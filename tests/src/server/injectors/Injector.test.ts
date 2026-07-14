@@ -204,13 +204,14 @@ describe('Injector', () => {
 				writeFileSync(blob, blobContent)
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
+				const modeBefore = statSync(executable).mode
 
 				expect(() => injector.inject()).not.toThrow()
 
 				// The streamed rewrite (temp file + atomic rename) must preserve the
-				// executable's mode bits, including the executable bit, and must not
-				// leave its `.inject-*.tmp` staging file behind.
-				expect(statSync(executable).mode & 0o777).toBe(0o755)
+				// executable's mode exactly, and must not leave its `.inject-*.tmp`
+				// staging file behind.
+				expect(statSync(executable).mode).toBe(modeBefore)
 				const leftoverTemp = readdirSync(dir.root).filter((name) => name.startsWith('.inject-'))
 				expect(leftoverTemp).toEqual([])
 

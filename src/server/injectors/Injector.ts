@@ -1344,7 +1344,7 @@ export class Injector implements InjectorInterface {
 	#injectMacho(): void {
 		const exePath = this.#options.executable
 		const fileSize = statSync(exePath).size
-		const srcFd = openSync(exePath, 'r')
+		let srcFd: number | undefined = openSync(exePath, 'r')
 		let destFd: number | undefined
 		let blobFd: number | undefined
 		let injTemp: string | undefined
@@ -1597,6 +1597,11 @@ export class Injector implements InjectorInterface {
 
 			closeSync(destFd)
 			destFd = undefined
+
+			// Windows cannot rename a replacement over a file that still has an open
+			// handle; release the source read handle before finalizeExecutable renames.
+			closeSync(srcFd)
+			srcFd = undefined
 
 			// openSync's mode is masked by umask, which can silently drop the
 			// exec bit; chmod is not masked, so it reproduces the host binary's
