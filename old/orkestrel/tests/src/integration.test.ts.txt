@@ -1,0 +1,40 @@
+import { describe, it, expect } from 'vitest'
+import { createSeal } from '@orkestrel/seal'
+import { createReporter } from '@orkestrel/core'
+
+describe('seal integration', () => {
+	it('createReporter creates a working reporter', () => {
+		const reporter = createReporter({ silent: true })
+
+		expect(reporter).toBeDefined()
+		reporter.info('test')
+		reporter.success('ok')
+	})
+
+	it('createSeal creates a seal instance', () => {
+		const seal = createSeal({
+			name: 'test-app',
+			entry: 'dist/bin/serve.cjs',
+			output: 'dist/sea',
+		})
+
+		expect(seal).toBeDefined()
+		expect(seal.status).toBe('idle')
+	})
+
+	it('createSeal accepts full options', () => {
+		const reporter = createReporter({ silent: true })
+		const seal = createSeal({
+			name: 'orkestrel',
+			entry: 'dist/bin/serve.cjs',
+			output: 'dist/sea',
+			assets: { 'index.html.br': 'dist/client/index.html.br' },
+			compress: ['dist/client'],
+			subsystem: 'gui',
+			reporter,
+			root: process.cwd(),
+		})
+
+		expect(seal.status).toBe('idle')
+	})
+})

@@ -1,0 +1,250 @@
+import { describe, it, expect } from "vitest";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { platformConfig, isPlatformSupported } from "../../../scripts/helpers.js";
+import {
+  DIST_DIR,
+  DIST_CLIENT_DIR,
+  DIST_SERVER_DIR,
+  SEA_BLOB_PATH,
+  SEA_CONFIG_PATH,
+  ROOT_DIR,
+} from "../../../scripts/constants.js";
+
+/**
+ * Build integration tests
+ *
+ * These tests verify that build artifacts exist and are properly structured.
+ * They assume the build has been run at least once.
+ *
+ * To ensure tests pass:
+ * 1. Run: npm run build
+ * 2. Run: npm test
+ *
+ * Executable will be named tsea.exe (Windows) or tsea (Unix)
+ */
+describe("scripts/bin/build", () => {
+  const config = platformConfig();
+  const EXECUTABLE = join(DIST_DIR, config.executable);
+
+  // Check at module evaluation time
+  const buildExists = existsSync(DIST_DIR);
+
+  describe("build output structure", () => {
+    it.skipIf(!buildExists)("should create dist directory after build", () => {
+      expect(existsSync(DIST_DIR)).toBe(true);
+      const stat = statSync(DIST_DIR);
+      expect(stat.isDirectory()).toBe(true);
+    });
+
+    it.skipIf(!buildExists)("should create dist/client directory", () => {
+      expect(existsSync(DIST_CLIENT_DIR)).toBe(true);
+      const stat = statSync(DIST_CLIENT_DIR);
+      expect(stat.isDirectory()).toBe(true);
+    });
+
+    it.skipIf(!buildExists)("should create dist/server directory", () => {
+      expect(existsSync(DIST_SERVER_DIR)).toBe(true);
+      const stat = statSync(DIST_SERVER_DIR);
+      expect(stat.isDirectory()).toBe(true);
+    });
+
+    it.skipIf(!buildExists)("should generate SEA blob file", () => {
+      expect(existsSync(SEA_BLOB_PATH)).toBe(true);
+      const stat = statSync(SEA_BLOB_PATH);
+      expect(stat.isFile()).toBe(true);
+      expect(stat.size).toBeGreaterThan(0);
+    });
+
+    it.skipIf(!buildExists)("should create platform-specific executable", () => {
+      expect(existsSync(EXECUTABLE)).toBe(true);
+      const stat = statSync(EXECUTABLE);
+      expect(stat.isFile()).toBe(true);
+      expect(stat.size).toBeGreaterThan(1000000);
+    });
+  });
+
+  describe("compression", () => {
+    it.skipIf(!buildExists)("should compress client assets with Brotli", () => {
+      const compressedAsset = join(DIST_CLIENT_DIR, "index.html.br");
+      expect(existsSync(compressedAsset)).toBe(true);
+
+      const stat = statSync(compressedAsset);
+      expect(stat.isFile()).toBe(true);
+      expect(stat.size).toBeGreaterThan(0);
+    });
+
+    it.skipIf(!buildExists)("should create assets-manifest.json", () => {
+      const manifestPath = join(DIST_CLIENT_DIR, "assets-manifest.json");
+      expect(existsSync(manifestPath)).toBe(true);
+
+      const content = readFileSync(manifestPath, "utf-8");
+      const manifest = JSON.parse(content) as Record<string, unknown>;
+
+      expect(manifest).toHaveProperty("generatedAt");
+      expect(manifest).toHaveProperty("assets");
+      expect(manifest).toHaveProperty("total");
+      expect(manifest.total).toHaveProperty("original");
+      expect(manifest.total).toHaveProperty("compressed");
+      expect(manifest.total).toHaveProperty("ratio");
+      expect(Array.isArray(manifest.assets)).toBe(true);
+    });
+
+    it.skipIf(!buildExists)("should achieve ratio > 50%", () => {
+      const manifestPath = join(DIST_CLIENT_DIR, "assets-manifest.json");
+      const content = readFileSync(manifestPath, "utf-8");
+      const manifest = JSON.parse(content) as {
+        total: { ratio: number; original: number; compressed: number };
+      };
+
+      expect(manifest.total.ratio).toBeGreaterThan(0.5);
+      expect(manifest.total.compressed).toBeLessThan(manifest.total.original);
+    });
+  });
+
+  describe("server bundle", () => {
+    it.skipIf(!buildExists)("should generate main.cjs in dist/server", () => {
+      const serverBundle = join(DIST_SERVER_DIR, "main.cjs");
+      expect(existsSync(serverBundle)).toBe(true);
+
+      const stat = statSync(serverBundle);
+      expect(stat.isFile()).toBe(true);
+      expect(stat.size).toBeGreaterThan(0);
+    });
+
+    it.skipIf(!buildExists)("should bundle all server dependencies", () => {
+      const serverBundle = join(DIST_SERVER_DIR, "main.cjs");
+      const content = readFileSync(serverBundle, "utf-8");
+
+      expect(content.length).toBeGreaterThan(1000);
+      expect(content).toMatch(/require|import|export|function|const|let|var/);
+    });
+
+    it.skipIf(!buildExists)("should externalize Node built-ins", () => {
+      const serverBundle = join(DIST_SERVER_DIR, "main.cjs");
+      const content = readFileSync(serverBundle, "utf-8");
+
+      expect(
+        content.includes("node:http") ||
+          content.includes('require("http")') ||
+          content.includes("require('http')"),
+      ).toBe(true);
+    });
+  });
+
+  describe("SEA generation", () => {
+    it("should read sea-config.json", () => {
+      expect(existsSync(SEA_CONFIG_PATH)).toBe(true);
+
+      const content = readFileSync(SEA_CONFIG_PATH, "utf-8");
+      const seaConfigParsed = JSON.parse(content) as Record<string, unknown>;
+
+      expect(seaConfigParsed).toHaveProperty("main");
+      expect(seaConfigParsed).toHaveProperty("output");
+      expect(seaConfigParsed).toHaveProperty("assets");
+    });
+
+    it.skipIf(!buildExists)("should generate sea-prep.blob", () => {
+      expect(existsSync(SEA_BLOB_PATH)).toBe(true);
+
+      const stat = statSync(SEA_BLOB_PATH);
+      expect(stat.size).toBeGreaterThan(10000);
+    });
+
+    it.skipIf(!buildExists)("should inject blob into Node executable", () => {
+      expect(existsSync(EXECUTABLE)).toBe(true);
+
+      const stat = statSync(EXECUTABLE);
+      expect(stat.size).toBeGreaterThan(1000000);
+    });
+  });
+
+  describe("platform-specific handling", () => {
+    it.skipIf(!buildExists)("should use correct executable name for platform", () => {
+      const expectedName = config.executable;
+      expect(existsSync(join(DIST_DIR, expectedName))).toBe(true);
+
+      // Platform determines extension
+      const isDarwinOrLinux = process.platform === "darwin" || process.platform === "linux";
+      expect(expectedName.endsWith(".exe")).toBe(!isDarwinOrLinux);
+    });
+
+    it("should match signature handling to platform", () => {
+      // Both darwin and win32 strip signatures before blob injection
+      const needsRemoval = process.platform === "darwin" || process.platform === "win32";
+      expect(config.removeSignature).toBe(needsRemoval);
+    });
+
+    it("should match re-signing to platform", () => {
+      const isDarwin = process.platform === "darwin";
+      expect(config.resign).toBe(isDarwin);
+    });
+  });
+
+  describe("prerequisites", () => {
+    it("should have SEA config present", () => {
+      expect(existsSync(SEA_CONFIG_PATH)).toBe(true);
+    });
+
+    it("should have postject installed", () => {
+      const postjectBin = join(
+        ROOT_DIR,
+        "node_modules",
+        ".bin",
+        process.platform === "win32" ? "postject.cmd" : "postject",
+      );
+      expect(existsSync(postjectBin)).toBe(true);
+    });
+  });
+
+  describe("build artifacts validation", () => {
+    it.skipIf(!buildExists)("should validate index.html exists after client build", () => {
+      const indexPath = join(DIST_CLIENT_DIR, "index.html");
+      expect(existsSync(indexPath)).toBe(true);
+    });
+
+    it.skipIf(!buildExists)("should validate main.cjs exists after server build", () => {
+      const serverBundle = join(DIST_SERVER_DIR, "main.cjs");
+      expect(existsSync(serverBundle)).toBe(true);
+    });
+
+    it.skipIf(!buildExists)("should validate SEA blob exists", () => {
+      expect(existsSync(SEA_BLOB_PATH)).toBe(true);
+    });
+
+    it.skipIf(!buildExists)("should validate final executable exists", () => {
+      expect(existsSync(EXECUTABLE)).toBe(true);
+
+      // On Unix, verify executable permissions
+      const stat = statSync(EXECUTABLE);
+      const isUnix = process.platform !== "win32";
+      const hasExecBit = (stat.mode & 0o111) !== 0;
+      expect(!isUnix || hasExecBit).toBe(true);
+    });
+  });
+
+  describe("platform helpers integration", () => {
+    it("should return config for current platform", () => {
+      const currentConfig = platformConfig();
+
+      expect(currentConfig).toBeDefined();
+      expect(currentConfig.executable).toBeDefined();
+    });
+
+    it("should report current platform as supported", () => {
+      expect(isPlatformSupported()).toBe(true);
+    });
+
+    it("should report win32 as supported", () => {
+      expect(isPlatformSupported("win32")).toBe(true);
+    });
+
+    it("should report darwin as supported", () => {
+      expect(isPlatformSupported("darwin")).toBe(true);
+    });
+
+    it("should report linux as supported", () => {
+      expect(isPlatformSupported("linux")).toBe(true);
+    });
+  });
+});

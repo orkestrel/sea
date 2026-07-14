@@ -1,0 +1,167 @@
+import { describe, it, expect } from 'vitest'
+import {
+	computeSize,
+	formatSize,
+	isCompressible,
+	isPlatformSupported,
+	platformConfig,
+	walkDirectory,
+	splitLines,
+	ShellError,
+} from '@orkestrel/seal'
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+describe('seal helpers', () => {
+	describe('computeSize', () => {
+		it('computes ratio correctly', () => {
+			const result = computeSize(1000, 250)
+
+			expect(result.original).toBe(1000)
+			expect(result.compressed).toBe(250)
+			expect(result.ratio).toBe(0.25)
+		})
+
+		it('handles zero original', () => {
+			const result = computeSize(0, 0)
+
+			expect(result.ratio).toBe(0)
+		})
+	})
+
+	describe('formatSize', () => {
+		it('formats bytes', () => {
+			expect(formatSize(500)).toBe('500 B')
+		})
+
+		it('formats kilobytes', () => {
+			expect(formatSize(2048)).toBe('2.0 KB')
+		})
+
+		it('formats megabytes', () => {
+			expect(formatSize(5 * 1024 * 1024)).toBe('5.00 MB')
+		})
+	})
+
+	describe('isCompressible', () => {
+		it('returns true for HTML', () => {
+			expect(isCompressible('index.html')).toBe(true)
+		})
+
+		it('returns true for CSS', () => {
+			expect(isCompressible('style.css')).toBe(true)
+		})
+
+		it('returns true for JS', () => {
+			expect(isCompressible('app.js')).toBe(true)
+		})
+
+		it('returns false for .br', () => {
+			expect(isCompressible('file.br')).toBe(false)
+		})
+
+		it('returns false for .gz', () => {
+			expect(isCompressible('file.gz')).toBe(false)
+		})
+
+		it('returns false for .png', () => {
+			expect(isCompressible('image.png')).toBe(false)
+		})
+
+		it('returns false for .woff2', () => {
+			expect(isCompressible('font.woff2')).toBe(false)
+		})
+	})
+
+	describe('isPlatformSupported', () => {
+		it('supports win32', () => {
+			expect(isPlatformSupported('win32')).toBe(true)
+		})
+
+		it('supports darwin', () => {
+			expect(isPlatformSupported('darwin')).toBe(true)
+		})
+
+		it('supports linux', () => {
+			expect(isPlatformSupported('linux')).toBe(true)
+		})
+
+		it('rejects unknown platform', () => {
+			expect(isPlatformSupported('freebsd')).toBe(false)
+		})
+	})
+
+	describe('platformConfig', () => {
+		it('returns config for win32', () => {
+			const config = platformConfig('win32')
+
+			expect(config).toBeDefined()
+			expect(config?.executable).toBe('node.exe')
+		})
+
+		it('returns config for darwin', () => {
+			const config = platformConfig('darwin')
+
+			expect(config).toBeDefined()
+			expect(config?.executable).toBe('node')
+			expect(config?.resign).toBeDefined()
+		})
+
+		it('returns config for linux', () => {
+			const config = platformConfig('linux')
+
+			expect(config).toBeDefined()
+			expect(config?.removeSignature).toBeUndefined()
+		})
+
+		it('returns undefined for unknown', () => {
+			expect(platformConfig('freebsd')).toBeUndefined()
+		})
+	})
+
+	describe('walkDirectory', () => {
+		const testDir = join(tmpdir(), `seal-walk-test-${Date.now()}`)
+
+		it('walks a directory tree', () => {
+			mkdirSync(join(testDir, 'sub'), { recursive: true })
+			writeFileSync(join(testDir, 'a.txt'), 'a')
+			writeFileSync(join(testDir, 'sub', 'b.txt'), 'b')
+
+			const files = walkDirectory(testDir)
+
+			expect(files).toContain('a.txt')
+			expect(files).toContain(join('sub', 'b.txt'))
+
+			rmSync(testDir, { recursive: true, force: true })
+		})
+	})
+
+	describe('splitLines', () => {
+		it('splits buffer into trimmed lines', () => {
+			const buf = Buffer.from('  line1  \n  line2  \n\n  line3  \n')
+			const lines = splitLines(buf)
+
+			expect(lines).toEqual(['line1', 'line2', 'line3'])
+		})
+
+		it('handles empty buffer', () => {
+			const lines = splitLines(Buffer.alloc(0))
+
+			expect(lines).toEqual([])
+		})
+	})
+
+	describe('ShellError', () => {
+		it('stores stdout and stderr', () => {
+			const stdout = Buffer.from('out')
+			const stderr = Buffer.from('err')
+			const error = new ShellError('failed', stdout, stderr)
+
+			expect(error.message).toBe('failed')
+			expect(error.stdout).toBe(stdout)
+			expect(error.stderr).toBe(stderr)
+			expect(error.name).toBe('ShellError')
+		})
+	})
+})

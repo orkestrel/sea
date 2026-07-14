@@ -1,0 +1,310 @@
+/**
+ * Seal
+ *
+ * Build orchestrator for Node.js Single Executable Applications.
+ * Compresses assets, generates the SEA blob, copies the Node binary,
+ * injects the blob, and handles platform-specific signing.
+ */
+
+import { copyFileSync, existsSync, mkdirSync, statSync, writeFileSync, chmodSync } from 'node:fs'
+import { resolve, join } from 'node:path'
+import type {
+	CompressionManifest,
+	SealInterface,
+	SealOptions,
+	SealResult,
+	SealStatus,
+	SealStep,
+} from '../types.js'
+import type { ReporterInterface } from '@orkestrel/core'
+import {
+	PE_SUBSYSTEM_CONSOLE,
+	PE_SUBSYSTEM_WINDOWS,
+	SEA_BLOB_RESOURCE,
+	SEA_SENTINEL_FUSE,
+} from '../constants.js'
+import {
+	compressDirectory,
+	formatSize,
+	isPeExecutable,
+	isPlatformSupported,
+	patchPeSubsystem,
+	platformConfig,
+	run,
+	stripPeSignature,
+} from '../helpers.js'
+import { Injector } from '../injectors/Injector.js'
+import { Reporter } from '@orkestrel/core'
+
+// === Seal
+
+export class Seal implements SealInterface {
+	#status: SealStatus = 'idle'
+	#options: SealOptions
+	#reporter: ReporterInterface
+
+	readonly #stepListeners = new Set<(step: SealStep) => void>()
+	readonly #completeListeners = new Set<(result: SealResult) => void>()
+	readonly #errorListeners = new Set<(error: Error) => void>()
+
+	constructor(options: SealOptions) {
+		this.#options = options
+		this.#reporter = options.reporter ?? new Reporter()
+
+		if (options.onStep !== undefined) {
+			this.#stepListeners.add(options.onStep)
+		}
+		if (options.onComplete !== undefined) {
+			this.#completeListeners.add(options.onComplete)
+		}
+		if (options.onError !== undefined) {
+			this.#errorListeners.add(options.onError)
+		}
+	}
+
+	get status(): SealStatus {
+		return this.#status
+	}
+
+	async execute(): Promise<SealResult> {
+		if (this.#status === 'active') {
+			throw new Error('Seal build already in progress')
+		}
+
+		this.#status = 'active'
+		const startTime = Date.now()
+		const root = this.#options.root ?? process.cwd()
+		const platform = platformConfig()
+
+		if (platform === undefined || !isPlatformSupported()) {
+			const error = new Error(`Unsupported platform: ${process.platform}`)
+			this.#status = 'error'
+			this.#emitError(error)
+			throw error
+		}
+
+		try {
+			this.#reporter.section('Seal Build')
+			this.#reporter.detail('Platform', process.platform)
+			this.#reporter.detail('Architecture', process.arch)
+			this.#reporter.detail('Entry', this.#options.entry)
+			this.#reporter.detail('Output', this.#options.output)
+
+			// Step 1: Compress assets
+			this.#emitStep('compress')
+			let compressed: CompressionManifest | undefined
+
+			if (this.#options.compress !== undefined && this.#options.compress.length > 0) {
+				this.#reporter.step(1, 3, 'Compressing assets...')
+				const allResults: CompressionManifest['assets'][number][] = []
+				let totalOriginal = 0
+				let totalCompressed = 0
+
+				for (const dir of this.#options.compress) {
+					const fullDir = resolve(root, dir)
+					if (!existsSync(fullDir)) {
+						this.#reporter.warn(`Directory not found: ${dir}`)
+						continue
+					}
+					const manifest = compressDirectory(fullDir)
+					allResults.push(...manifest.assets)
+					totalOriginal += manifest.total.original
+					totalCompressed += manifest.total.compressed
+				}
+
+				compressed = {
+					generatedAt: new Date().toISOString(),
+					assets: allResults,
+					total: {
+						original: totalOriginal,
+						compressed: totalCompressed,
+						ratio: totalOriginal > 0 ? totalCompressed / totalOriginal : 0,
+					},
+				}
+
+				this.#reporter.success(
+					`Compressed ${String(allResults.length)} files ` +
+						`(${formatSize(totalOriginal)} → ${formatSize(totalCompressed)}, ` +
+						`${(compressed.total.ratio * 100).toFixed(1)}%)`,
+				)
+			} else {
+				this.#reporter.skip('No directories to compress')
+			}
+
+			// Step 2: Generate SEA blob
+			this.#emitStep('blob')
+			this.#reporter.step(2, 3, 'Generating SEA blob...')
+
+			const outputDir = resolve(root, this.#options.output)
+			mkdirSync(outputDir, { recursive: true })
+
+			const seaConfigPath = join(outputDir, 'sea-config.json')
+			const blobPath = join(outputDir, 'sea-prep.blob')
+
+			const seaConfig: Record<string, unknown> = {
+				main: resolve(root, this.#options.entry),
+				output: blobPath,
+				disableExperimentalSEAWarning: true,
+				useSnapshot: false,
+				useCodeCache: true,
+			}
+
+			// Add assets to SEA config
+			if (this.#options.assets !== undefined) {
+				const assets: Record<string, string> = {}
+				for (const [key, assetPath] of Object.entries(this.#options.assets)) {
+					assets[key] = resolve(root, assetPath)
+				}
+				seaConfig.assets = assets
+			}
+
+			writeFileSync(seaConfigPath, JSON.stringify(seaConfig, null, 2))
+
+			run([process.execPath, '--experimental-sea-config', seaConfigPath], { cwd: outputDir })
+
+			if (!existsSync(blobPath)) {
+				throw new Error('SEA blob generation failed — blob not found')
+			}
+
+			const blobSize = statSync(blobPath).size
+			this.#reporter.success(`SEA blob generated (${formatSize(blobSize)})`)
+
+			// Step 3: Assemble executable
+			this.#emitStep('assemble')
+			this.#reporter.step(3, 3, 'Assembling executable...')
+
+			const executableName =
+				process.platform === 'win32' ? `${this.#options.name}.exe` : this.#options.name
+			const outputPath = join(outputDir, executableName)
+
+			// Copy Node binary
+			copyFileSync(process.execPath, outputPath)
+
+			// Make executable on unix
+			if (process.platform !== 'win32') {
+				chmodSync(outputPath, 0o755)
+			}
+
+			// Remove signature (platform-specific)
+			if (platform.removeSignature !== undefined) {
+				try {
+					if (process.platform === 'win32') {
+						// On Windows, try signtool; skip if unavailable
+						stripPeSignature(outputPath)
+						this.#reporter.debug('Removed PE signature')
+					} else {
+						run([...platform.removeSignature, outputPath])
+						this.#reporter.debug('Removed code signature')
+					}
+				} catch {
+					this.#reporter.debug('No signature to remove')
+				}
+			}
+
+			// Inject SEA blob using the built-in cross-platform injector
+			const injector = new Injector({
+				executablePath: outputPath,
+				resourceName: SEA_BLOB_RESOURCE,
+				blobPath,
+				sentinelFuse: SEA_SENTINEL_FUSE,
+				machoSegmentName: 'NODE_SEA',
+			})
+			injector.inject()
+			this.#reporter.success(`SEA blob injected (${injector.format})`)
+
+			// Re-sign (macOS)
+			if (platform.resign !== undefined) {
+				try {
+					run([...platform.resign, outputPath])
+					this.#reporter.debug('Re-signed executable')
+				} catch {
+					this.#reporter.warn('Could not re-sign executable')
+				}
+			}
+
+			// Patch PE subsystem (Windows)
+			if (process.platform === 'win32' && isPeExecutable(outputPath)) {
+				const subsystemValue =
+					this.#options.subsystem === 'gui' ? PE_SUBSYSTEM_WINDOWS : PE_SUBSYSTEM_CONSOLE
+				patchPeSubsystem(outputPath, subsystemValue)
+				this.#reporter.debug(`PE subsystem set to ${this.#options.subsystem ?? 'console'}`)
+			}
+
+			const finalSize = statSync(outputPath).size
+			const duration = Date.now() - startTime
+
+			this.#reporter.divider()
+			this.#reporter.pair('Executable', outputPath)
+			this.#reporter.pair('Size', formatSize(finalSize))
+			this.#reporter.timing('Build time', duration)
+			this.#reporter.done('Seal build complete')
+
+			const result: SealResult = {
+				executable: outputPath,
+				platform: process.platform,
+				size: finalSize,
+				duration,
+				compressed,
+			}
+
+			this.#status = 'done'
+			this.#emitComplete(result)
+			return result
+		} catch (thrown: unknown) {
+			this.#status = 'error'
+			const error = thrown instanceof Error ? thrown : new Error(String(thrown))
+			this.#reporter.error(error.message)
+			this.#emitError(error)
+			throw error
+		}
+	}
+
+	// === Subscriptions
+
+	onStep(callback: (step: SealStep) => void): () => void {
+		this.#stepListeners.add(callback)
+		return () => this.#stepListeners.delete(callback)
+	}
+
+	onComplete(callback: (result: SealResult) => void): () => void {
+		this.#completeListeners.add(callback)
+		return () => this.#completeListeners.delete(callback)
+	}
+
+	onError(callback: (error: Error) => void): () => void {
+		this.#errorListeners.add(callback)
+		return () => this.#errorListeners.delete(callback)
+	}
+
+	// === Private
+
+	#emitStep(step: SealStep): void {
+		for (const listener of this.#stepListeners) {
+			try {
+				listener(step)
+			} catch {
+				/* ignore */
+			}
+		}
+	}
+
+	#emitComplete(result: SealResult): void {
+		for (const listener of this.#completeListeners) {
+			try {
+				listener(result)
+			} catch {
+				/* ignore */
+			}
+		}
+	}
+
+	#emitError(error: Error): void {
+		for (const listener of this.#errorListeners) {
+			try {
+				listener(error)
+			} catch {
+				/* ignore */
+			}
+		}
+	}
+}

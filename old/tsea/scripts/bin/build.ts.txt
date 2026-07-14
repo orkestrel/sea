@@ -1,0 +1,148 @@
+/**
+ * Single Executable Application (SEA) build script.
+ *
+ * Builds the client, server, compresses assets, and generates
+ * a standalone executable for the current platform.
+ */
+
+import {
+  DIST_DIR,
+  DIST_CLIENT_DIR,
+  DIST_SERVER_DIR,
+  SEA_CONFIG_PATH,
+  SEA_BLOB_PATH,
+  DEFAULT_COMPRESSION_QUALITY,
+  PE_SUBSYSTEM_WINDOWS,
+} from "../constants.js";
+import {
+  compressDirectory,
+  ensureExists,
+  formatSize,
+  isPeExecutable,
+  patchPeSubsystem,
+  platformConfig,
+  resolvePostjectCommand,
+  run,
+  stripPeSignature,
+} from "../helpers.js";
+import { Logger } from "../logger.js";
+import { copyFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * Execute the full SEA build pipeline.
+ *
+ * @example
+ * ```ts
+ * await build()
+ * ```
+ */
+export async function build(): Promise<void> {
+  const log = new Logger();
+  const config = platformConfig();
+  const outputExe = join(DIST_DIR, config.executable);
+  const buildStart = performance.now();
+
+  log.capture();
+
+  log.section("Building Single Executable Application");
+  log.pair("Platform", process.platform);
+  log.pair("Node", process.version);
+  log.pair("Output", config.executable);
+
+  // --- Step 1: Client
+  log.divider();
+  log.step(1, 5, "Building Vue client");
+  mkdirSync(DIST_CLIENT_DIR, { recursive: true });
+  const clientStart = performance.now();
+  run("npm run build:client");
+  ensureExists(join(DIST_CLIENT_DIR, "index.html"), "Client build failed — index.html not found");
+  log.timing("Client", performance.now() - clientStart);
+
+  // --- Step 2: Compress
+  log.step(2, 5, "Compressing assets");
+  const compressStart = performance.now();
+  const manifest = compressDirectory(DIST_CLIENT_DIR, {
+    quality: DEFAULT_COMPRESSION_QUALITY,
+  });
+  writeFileSync(join(DIST_CLIENT_DIR, "assets-manifest.json"), JSON.stringify(manifest, null, 2));
+  log.timing("Compression", performance.now() - compressStart);
+  log.list(
+    manifest.assets.map((a) => {
+      const name = a.input.split(/[\\/]/).pop() ?? a.input;
+      return `${name} ${formatSize(a.size.original)} → ${formatSize(a.size.compressed)}`;
+    }),
+  );
+
+  // --- Step 3: Server
+  log.step(3, 5, "Building Node server");
+  mkdirSync(DIST_SERVER_DIR, { recursive: true });
+  const serverStart = performance.now();
+  run("npm run build:server");
+  ensureExists(join(DIST_SERVER_DIR, "main.cjs"), "Server build failed — main.cjs not found");
+  log.timing("Server", performance.now() - serverStart);
+
+  // --- Step 4: SEA blob
+  log.step(4, 5, "Generating SEA blob");
+  mkdirSync(DIST_DIR, { recursive: true });
+  ensureExists(SEA_CONFIG_PATH, "SEA config not found");
+  run(`node --experimental-sea-config "${SEA_CONFIG_PATH}"`);
+  ensureExists(SEA_BLOB_PATH, "SEA blob was not generated");
+  log.detail(`Blob: ${formatSize(statSync(SEA_BLOB_PATH).size)}`);
+
+  // --- Step 5: Assemble executable
+  log.step(5, 5, "Assembling executable");
+  copyFileSync(process.execPath, outputExe);
+
+  // Strip signature before injection (Windows: Authenticode, macOS: codesign)
+  if (config.removeSignature) {
+    if (isPeExecutable(outputExe)) {
+      if (stripPeSignature(outputExe)) {
+        log.detail("Authenticode signature stripped");
+      }
+    } else {
+      try {
+        run(`codesign --remove-signature "${outputExe}"`);
+      } catch {
+        log.debug("Signature removal skipped");
+      }
+    }
+  }
+
+  // Inject blob
+  run(resolvePostjectCommand(outputExe, config));
+
+  // Re-sign (macOS)
+  if (config.resign) {
+    try {
+      run(`codesign --sign - "${outputExe}"`);
+    } catch {
+      log.warn("Code signing unavailable");
+    }
+  }
+
+  // Patch PE subsystem (Windows — no console window)
+  if (isPeExecutable(outputExe)) {
+    if (patchPeSubsystem(outputExe, PE_SUBSYSTEM_WINDOWS)) {
+      log.detail("GUI subsystem enabled");
+    }
+  }
+
+  // --- Summary
+  log.divider();
+  log.pair("Size", formatSize(statSync(outputExe).size));
+  log.pair("Path", outputExe);
+  log.timing("Total", performance.now() - buildStart);
+  log.done("Build complete!");
+  log.blank();
+
+  log.release();
+}
+
+// Execute build when run directly
+build().catch((error: unknown) => {
+  const log = new Logger();
+  const message = error instanceof Error ? error.message : String(error);
+  log.error(`Build failed: ${message}`);
+  process.exit(1);
+});

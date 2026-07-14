@@ -1,0 +1,131 @@
+// === Compression
+
+/** Size comparison between an original and its processed counterpart */
+export interface SizeComparison {
+  readonly original: number;
+  readonly compressed: number;
+  readonly ratio: number;
+}
+
+/** Result of compressing a single file */
+export interface CompressionResult {
+  readonly input: string;
+  readonly output: string;
+  readonly size: SizeComparison;
+}
+
+/** Manifest summarizing all compressed assets */
+export interface CompressionManifest {
+  readonly generatedAt: string;
+  readonly assets: readonly CompressionResult[];
+  readonly total: SizeComparison;
+}
+
+/** Options for Brotli compression */
+export interface CompressionOptions {
+  readonly quality?: number;
+  readonly mode?: number;
+}
+
+// === Platform
+
+/** Platform-specific build configuration */
+export interface PlatformConfig {
+  readonly executable: string;
+  readonly removeSignature: boolean;
+  readonly resign: boolean;
+  readonly postjectArgs: readonly string[];
+}
+
+// === Build
+
+/** Options for executing a shell command */
+export interface RunOptions {
+  readonly cwd?: string;
+  readonly env?: NodeJS.ProcessEnv;
+}
+
+/** Error shape from execSync when stdio is "pipe" */
+export interface ExecError extends Error {
+  readonly stdout: Buffer;
+  readonly stderr: Buffer;
+}
+
+// === Logger
+
+/** Semantic log level for filtering output by severity */
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+/** Options for creating a Logger */
+export interface LoggerOptions {
+  /** Suppress all output when true */
+  readonly silent?: boolean;
+  /** Minimum severity level — messages below this level are suppressed */
+  readonly level?: LogLevel;
+}
+
+/** Controller returned by `spinner()` to stop or fail the animation */
+export interface SpinnerHandle {
+  /** Stop the spinner with a success message */
+  stop(message: string): void;
+  /** Stop the spinner with a failure message */
+  fail(message: string): void;
+}
+
+/**
+ * Semantic console logger with icons, ANSI colors, and interactive elements.
+ *
+ * @remarks
+ * Provides structured, visually distinct log output for build
+ * scripts and CLI tools. Each method maps to a semantic intent
+ * (success, warning, error, etc.) with a corresponding icon
+ * and color.
+ *
+ * `capture()` silences all external output by replacing
+ * `console.log`, `console.warn`, `console.error`,
+ * `process.stdout.write`, and `process.stderr.write` with
+ * no-ops. Only explicit logger method calls produce output.
+ * Call `release()` to restore originals.
+ */
+export interface LoggerInterface {
+  /** Log an informational message (ℹ blue) */
+  info(message: string): void;
+  /** Log a success message (✔ green) */
+  success(message: string): void;
+  /** Log a warning message (⚠ yellow) */
+  warn(message: string): void;
+  /** Log an error message (✖ red) */
+  error(message: string): void;
+  /** Log a debug/verbose message (⋯ dim) */
+  debug(message: string): void;
+  /** Log a skipped operation (⊘ yellow dim) */
+  skip(message: string): void;
+  /** Log a timing measurement (⏱ cyan) */
+  timing(label: string, ms: number): void;
+  /** Log a numbered step (→ cyan) */
+  step(current: number, total: number, message: string): void;
+  /** Log a completion summary (🎉 green bold) */
+  done(message: string): void;
+  /** Log a section header (bold underline) */
+  section(title: string): void;
+  /** Print a blank line */
+  blank(): void;
+  /** Log a detail line with indentation (· dim) */
+  detail(message: string): void;
+  /** Log a key-value pair with alignment */
+  pair(key: string, value: string): void;
+  /** Log a bulleted list of items */
+  list(items: readonly string[]): void;
+  /** Print a horizontal divider */
+  divider(): void;
+  /** Log a fatal error message and throw (✖ red bold) */
+  fatal(message: string): never;
+  /** Render a progress bar (█░ cyan) */
+  progress(current: number, total: number, message?: string): void;
+  /** Start an animated spinner — returns a handle to stop or fail it */
+  spinner(message: string): SpinnerHandle;
+  /** Silence all external console and process stream output */
+  capture(): void;
+  /** Restore original console methods and process stream writers */
+  release(): void;
+}

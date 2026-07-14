@@ -1,0 +1,561 @@
+/**
+ * Scripts domain helpers and type guards
+ */
+
+import type {
+  CompressionManifest,
+  CompressionOptions,
+  CompressionResult,
+  ExecError,
+  PlatformConfig,
+  RunOptions,
+  SizeComparison,
+} from "./types.js";
+import {
+  PLATFORMS,
+  ROOT_DIR,
+  SEA_BLOB_PATH,
+  SEA_BLOB_RESOURCE,
+  SEA_SENTINEL_FUSE,
+} from "./constants.js";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  openSync,
+  readSync,
+  writeSync,
+  closeSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+  truncateSync,
+} from "node:fs";
+import { join, relative } from "node:path";
+import { brotliCompressSync, constants } from "node:zlib";
+
+// === Type Guards
+
+/**
+ * Check if a value is a non-null object (plain record).
+ *
+ * @param value - Value to check
+ * @returns True when value is a non-null, non-array object
+ *
+ * @example
+ * ```ts
+ * if (isRecord(value)) {
+ *     console.log(value.someField)
+ * }
+ * ```
+ */
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Check if a value is a valid SizeComparison.
+ *
+ * @param value - Value to check
+ * @returns True when value has original, compressed, and ratio numbers
+ *
+ * @example
+ * ```ts
+ * if (isSizeComparison(value)) {
+ *     console.log(value.ratio)
+ * }
+ * ```
+ */
+export function isSizeComparison(value: unknown): value is SizeComparison {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.original === "number" &&
+    typeof value.compressed === "number" &&
+    typeof value.ratio === "number"
+  );
+}
+
+/**
+ * Check if an error is an execSync error with captured output.
+ *
+ * @param value - Value to check
+ * @returns True when value has stdout and stderr Buffers
+ *
+ * @example
+ * ```ts
+ * try {
+ *     execSync(cmd, { stdio: 'pipe' })
+ * } catch (error) {
+ *     if (isExecError(error)) {
+ *         console.error(error.stderr.toString())
+ *     }
+ * }
+ * ```
+ */
+export function isExecError(value: unknown): value is ExecError {
+  if (!isRecord(value)) return false;
+  return Buffer.isBuffer(value.stdout) && Buffer.isBuffer(value.stderr);
+}
+
+/**
+ * Get platform-specific build configuration.
+ *
+ * @returns PlatformConfig for the current platform
+ * @throws {Error} If platform is not supported
+ *
+ * @example
+ * ```ts
+ * const config = platformConfig()
+ * console.log(config.executable)
+ * ```
+ */
+export function platformConfig(): PlatformConfig {
+  const config = PLATFORMS[process.platform];
+
+  if (!config) {
+    throw new Error(
+      `Unsupported platform: ${process.platform}. ` +
+        `Supported platforms: ${Object.keys(PLATFORMS).join(", ")}`,
+    );
+  }
+
+  return { ...config, postjectArgs: [...config.postjectArgs] };
+}
+
+/**
+ * Check if a platform is supported.
+ *
+ * @param platform - Platform string to check (defaults to process.platform)
+ * @returns true if the platform is supported
+ *
+ * @example
+ * ```ts
+ * if (isPlatformSupported('win32')) {
+ *     console.log('Windows is supported')
+ * }
+ * ```
+ */
+export function isPlatformSupported(platform: string = process.platform): boolean {
+  return platform in PLATFORMS;
+}
+
+// === Filesystem
+
+/**
+ * Assert that a file or directory exists.
+ *
+ * @param path - Path to check
+ * @param message - Error message if path does not exist
+ * @throws {Error} If path does not exist
+ *
+ * @example
+ * ```ts
+ * ensureExists('./dist/index.html', 'Build output not found')
+ * ```
+ */
+export function ensureExists(path: string, message: string): void {
+  if (!existsSync(path)) {
+    throw new Error(message);
+  }
+}
+
+/**
+ * Recursively list all file paths in a directory.
+ *
+ * @param dir - Directory to walk
+ * @param baseDir - Base directory for relative path calculation (defaults to dir)
+ * @returns Relative file paths from baseDir
+ *
+ * @example
+ * ```ts
+ * const files = walkDirectory('./dist/client')
+ * ```
+ */
+export function walkDirectory(dir: string, baseDir: string = dir): readonly string[] {
+  const results: string[] = [];
+  const entries = readdirSync(dir);
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    const stat = statSync(fullPath);
+
+    if (stat.isDirectory()) {
+      results.push(...walkDirectory(fullPath, baseDir));
+    } else {
+      results.push(relative(baseDir, fullPath));
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Check if a file should be compressed.
+ *
+ * @param filePath - Relative file path to check
+ * @returns true when the file is eligible for compression
+ *
+ * @example
+ * ```ts
+ * if (isCompressible('index.html')) {
+ *     // compress it
+ * }
+ * ```
+ */
+export function isCompressible(filePath: string): boolean {
+  if (filePath.endsWith(".br")) return false;
+  return !filePath.includes("manifest");
+}
+
+// === Shell
+
+/**
+ * Execute a shell command with error handling.
+ *
+ * @param cmd - Shell command to execute
+ * @param options - Execution options
+ * @throws {Error} If the command exits with non-zero status
+ *
+ * @example
+ * ```ts
+ * run('npm run build:client')
+ * ```
+ */
+export function run(cmd: string, options: RunOptions = {}): void {
+  const cwd = options.cwd ?? ROOT_DIR;
+  const env = options.env ?? process.env;
+
+  const result = spawnSync(cmd, {
+    stdio: "pipe",
+    cwd,
+    env,
+    shell: true,
+  });
+
+  if (result.status !== 0) {
+    const stderr = splitLines(result.stderr).join("\n");
+    const detail = stderr.length > 0 ? `\n${stderr}` : "";
+    throw new Error(`Command failed with exit code ${String(result.status)}: ${cmd}${detail}`);
+  }
+}
+
+/** Split a Buffer or null into non-empty trimmed lines */
+export function splitLines(buffer: Buffer | null): readonly string[] {
+  if (buffer === null) return [];
+  return buffer
+    .toString()
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+}
+
+// === Size
+
+/**
+ * Compute a SizeComparison from original and compressed byte counts.
+ *
+ * @param original - Original size in bytes
+ * @param compressed - Compressed size in bytes
+ * @returns SizeComparison with ratio (0 when original is 0)
+ *
+ * @example
+ * ```ts
+ * const size = computeSize(1000, 250)
+ * // size.ratio === 0.75
+ * ```
+ */
+export function computeSize(original: number, compressed: number): SizeComparison {
+  return {
+    original,
+    compressed,
+    ratio: original > 0 ? 1 - compressed / original : 0,
+  };
+}
+
+// === Compression
+
+/**
+ * Compress a single file with Brotli.
+ *
+ * @param input - Path to the file to compress
+ * @param output - Path for the compressed output
+ * @param options - Compression options
+ * @returns CompressionResult with size comparison
+ *
+ * @example
+ * ```ts
+ * const result = compressFile('./dist/index.html', './dist/index.html.br')
+ * console.log(result.size.ratio)
+ * ```
+ */
+export function compressFile(
+  input: string,
+  output: string,
+  options: CompressionOptions = {},
+): CompressionResult {
+  const quality = options.quality ?? constants.BROTLI_MAX_QUALITY;
+  const mode = options.mode ?? constants.BROTLI_MODE_TEXT;
+
+  const original = readFileSync(input);
+  const compressed = brotliCompressSync(original, {
+    params: {
+      [constants.BROTLI_PARAM_QUALITY]: quality,
+      [constants.BROTLI_PARAM_MODE]: mode,
+    },
+  });
+
+  writeFileSync(output, compressed);
+
+  return {
+    input,
+    output,
+    size: computeSize(original.length, compressed.length),
+  };
+}
+
+/**
+ * Compress all eligible files in a directory.
+ *
+ * @param dirPath - Directory containing files to compress
+ * @param options - Compression options
+ * @returns CompressionManifest summarizing all compressed assets
+ *
+ * @example
+ * ```ts
+ * const manifest = compressDirectory('./dist/client', { quality: 11 })
+ * console.log(manifest.total.ratio)
+ * ```
+ */
+export function compressDirectory(
+  dirPath: string,
+  options: CompressionOptions = {},
+): CompressionManifest {
+  const files = walkDirectory(dirPath);
+  const results: CompressionResult[] = [];
+
+  for (const file of files) {
+    if (isCompressible(file)) {
+      const fullPath = join(dirPath, file);
+      const result = compressFile(fullPath, fullPath + ".br", options);
+      results.push(result);
+    }
+  }
+
+  const totalOriginal = results.reduce((sum, r) => sum + r.size.original, 0);
+  const totalCompressed = results.reduce((sum, r) => sum + r.size.compressed, 0);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    assets: results,
+    total: computeSize(totalOriginal, totalCompressed),
+  };
+}
+
+// === Build
+
+/**
+ * Resolve the postject command string for injecting the SEA blob.
+ *
+ * @param outputPath - Path to the target executable
+ * @param config - Platform configuration
+ * @returns Full postject command string
+ * @throws {Error} If the postject binary is not found
+ *
+ * @example
+ * ```ts
+ * const cmd = resolvePostjectCommand('./dist/tsea.exe', platformConfig())
+ * run(cmd)
+ * ```
+ */
+export function resolvePostjectCommand(outputPath: string, config: PlatformConfig): string {
+  const postjectBin = join(
+    ROOT_DIR,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "postject.cmd" : "postject",
+  );
+
+  ensureExists(postjectBin, 'postject binary not found. Run "npm install" first.');
+
+  return [
+    `"${postjectBin}"`,
+    `"${outputPath}"`,
+    SEA_BLOB_RESOURCE,
+    `"${SEA_BLOB_PATH}"`,
+    `--sentinel-fuse ${SEA_SENTINEL_FUSE}`,
+    ...config.postjectArgs,
+  ].join(" ");
+}
+
+// === PE
+
+/** DOS header magic bytes */
+const DOS_MAGIC = 0x5a4d;
+
+/** PE signature bytes (PE\0\0) */
+const PE_SIGNATURE = 0x00004550;
+
+/**
+ * Parse and validate a PE executable, returning the PE header offset.
+ *
+ * @param fd - Open file descriptor
+ * @returns PE header offset, or -1 if the file is not a valid PE
+ */
+export function parsePeOffset(fd: number): number {
+  const magic = Buffer.alloc(2);
+  readSync(fd, magic, 0, 2, 0);
+  if (magic.readUInt16LE(0) !== DOS_MAGIC) return -1;
+
+  const offsetBuf = Buffer.alloc(4);
+  readSync(fd, offsetBuf, 0, 4, 0x3c);
+  const peOffset = offsetBuf.readUInt32LE(0);
+
+  const sigBuf = Buffer.alloc(4);
+  readSync(fd, sigBuf, 0, 4, peOffset);
+  if (sigBuf.readUInt32LE(0) !== PE_SIGNATURE) return -1;
+
+  return peOffset;
+}
+
+/**
+ * Read a 16-bit little-endian value from a file descriptor.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to read from
+ * @returns The 16-bit unsigned value
+ */
+export function readU16(fd: number, offset: number): number {
+  const buf = Buffer.alloc(2);
+  readSync(fd, buf, 0, 2, offset);
+  return buf.readUInt16LE(0);
+}
+
+/**
+ * Write a 16-bit little-endian value to a file descriptor.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to write at
+ * @param value - The 16-bit value to write
+ */
+export function writeU16(fd: number, offset: number, value: number): void {
+  const buf = Buffer.alloc(2);
+  buf.writeUInt16LE(value, 0);
+  writeSync(fd, buf, 0, 2, offset);
+}
+
+/**
+ * Check if a file is a valid PE executable.
+ *
+ * @param path - Path to the file
+ * @returns true when the file has a valid PE signature
+ *
+ * @example
+ * ```ts
+ * if (isPeExecutable('./dist/tsea.exe')) {
+ *     patchPeSubsystem('./dist/tsea.exe', PE_SUBSYSTEM_WINDOWS)
+ * }
+ * ```
+ */
+export function isPeExecutable(path: string): boolean {
+  const fd = openSync(path, "r");
+  try {
+    return parsePeOffset(fd) >= 0;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Patch the PE subsystem field in a Windows executable.
+ *
+ * @param path - Path to the PE executable
+ * @param subsystem - Target subsystem value (PE_SUBSYSTEM_CONSOLE or PE_SUBSYSTEM_WINDOWS)
+ * @returns true when the patch was applied, false when the value was already set
+ * @throws {Error} If the file is not a valid PE executable
+ *
+ * @remarks
+ * Setting to `PE_SUBSYSTEM_WINDOWS` (2) prevents Windows from allocating
+ * a console window. Setting to `PE_SUBSYSTEM_CONSOLE` (3) restores it.
+ * Pure Node.js — no `editbin` or Visual Studio required.
+ *
+ * @example
+ * ```ts
+ * patchPeSubsystem('./dist/tsea.exe', PE_SUBSYSTEM_WINDOWS)
+ * ```
+ */
+export function patchPeSubsystem(path: string, subsystem: number): boolean {
+  const fd = openSync(path, "r+");
+  try {
+    const peOffset = parsePeOffset(fd);
+    if (peOffset < 0) throw new Error(`Not a PE executable: ${path}`);
+
+    const subsystemOffset = peOffset + 0x5c;
+    if (readU16(fd, subsystemOffset) === subsystem) return false;
+
+    writeU16(fd, subsystemOffset, subsystem);
+    return true;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Strip the Authenticode signature from a PE executable.
+ *
+ * @param path - Path to the PE executable
+ * @returns true when the signature was stripped, false when none was present
+ * @throws {Error} If the file is not a valid PE executable
+ *
+ * @remarks
+ * Zeroes the Certificate Table data directory entry and truncates
+ * the appended certificate data. Same operation as `signtool remove /s`.
+ * Must be called BEFORE injecting the SEA blob with postject.
+ *
+ * @example
+ * ```ts
+ * stripPeSignature('./dist/tsea.exe')
+ * ```
+ */
+export function stripPeSignature(path: string): boolean {
+  const fd = openSync(path, "r+");
+  try {
+    const peOffset = parsePeOffset(fd);
+    if (peOffset < 0) throw new Error(`Not a PE executable: ${path}`);
+
+    // Data directory base depends on PE format (PE32 vs PE32+)
+    const magic = readU16(fd, peOffset + 0x18);
+    const dataDirBase = magic === 0x20b ? peOffset + 0x88 : peOffset + 0x78;
+
+    // Certificate Table is entry index 4 (each entry = 8 bytes)
+    const certOffset = dataDirBase + 32;
+    const certEntry = Buffer.alloc(8);
+    readSync(fd, certEntry, 0, 8, certOffset);
+
+    const certRva = certEntry.readUInt32LE(0);
+    const certSize = certEntry.readUInt32LE(4);
+    if (certRva === 0 && certSize === 0) return false;
+
+    // Zero the directory entry
+    writeSync(fd, Buffer.alloc(8), 0, 8, certOffset);
+    closeSync(fd);
+
+    // Truncate appended certificate data
+    if (certRva > 0) truncateSync(path, certRva);
+    return true;
+  } catch (error) {
+    try {
+      closeSync(fd);
+    } catch {
+      // Already closed in success path
+    }
+    throw error;
+  }
+}
+
+/** Format bytes into a human-readable string (KB or MB) */
+export function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  }
+  return `${(bytes / 1024).toFixed(1)}KB`;
+}

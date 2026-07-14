@@ -1,0 +1,211 @@
+import { describe, it, expect } from "vitest";
+import { computeSize } from "../../scripts/helpers.js";
+import type {
+  SizeComparison,
+  CompressionResult,
+  CompressionManifest,
+  CompressionOptions,
+  PlatformConfig,
+  RunOptions,
+  ExecError,
+  LogLevel,
+  LoggerOptions,
+  SpinnerHandle,
+} from "../../scripts/types.js";
+
+describe("scripts/types", () => {
+  describe("SizeComparison", () => {
+    it("should satisfy the interface shape", () => {
+      const size: SizeComparison = computeSize(100, 25);
+
+      expect(size).toHaveProperty("original");
+      expect(size).toHaveProperty("compressed");
+      expect(size).toHaveProperty("ratio");
+      expect(typeof size.original).toBe("number");
+      expect(typeof size.compressed).toBe("number");
+      expect(typeof size.ratio).toBe("number");
+    });
+  });
+
+  describe("CompressionResult", () => {
+    it("should satisfy the interface shape", () => {
+      const result: CompressionResult = {
+        input: "/path/to/file.html",
+        output: "/path/to/file.html.br",
+        size: { original: 1000, compressed: 250, ratio: 0.75 },
+      };
+
+      expect(result).toHaveProperty("input");
+      expect(result).toHaveProperty("output");
+      expect(result).toHaveProperty("size");
+      expect(result.size).toHaveProperty("original");
+      expect(result.size).toHaveProperty("compressed");
+      expect(result.size).toHaveProperty("ratio");
+    });
+  });
+
+  describe("CompressionManifest", () => {
+    it("should satisfy the interface shape", () => {
+      const manifest: CompressionManifest = {
+        generatedAt: new Date().toISOString(),
+        assets: [],
+        total: { original: 0, compressed: 0, ratio: 0 },
+      };
+
+      expect(manifest).toHaveProperty("generatedAt");
+      expect(manifest).toHaveProperty("assets");
+      expect(manifest).toHaveProperty("total");
+      expect(Array.isArray(manifest.assets)).toBe(true);
+    });
+
+    it("should allow readonly assets array", () => {
+      const manifest: CompressionManifest = {
+        generatedAt: new Date().toISOString(),
+        assets: [
+          {
+            input: "/a.html",
+            output: "/a.html.br",
+            size: { original: 100, compressed: 50, ratio: 0.5 },
+          },
+        ],
+        total: { original: 100, compressed: 50, ratio: 0.5 },
+      };
+
+      expect(manifest.assets.length).toBe(1);
+    });
+  });
+
+  describe("CompressionOptions", () => {
+    it("should allow empty options", () => {
+      const options: CompressionOptions = {};
+
+      expect(options.quality).toBeUndefined();
+      expect(options.mode).toBeUndefined();
+    });
+
+    it("should allow quality and mode", () => {
+      const options: CompressionOptions = { quality: 11, mode: 1 };
+
+      expect(options.quality).toBe(11);
+      expect(options.mode).toBe(1);
+    });
+  });
+
+  describe("PlatformConfig", () => {
+    it("should satisfy the interface shape", () => {
+      const config: PlatformConfig = {
+        executable: "tsea.exe",
+        removeSignature: false,
+        resign: false,
+        postjectArgs: [],
+      };
+
+      expect(config).toHaveProperty("executable");
+      expect(config).toHaveProperty("removeSignature");
+      expect(config).toHaveProperty("resign");
+      expect(config).toHaveProperty("postjectArgs");
+    });
+
+    it("should allow darwin-specific fields", () => {
+      const config: PlatformConfig = {
+        executable: "tsea",
+        removeSignature: true,
+        resign: true,
+        postjectArgs: ["--macho-segment-name", "NODE_SEA"],
+      };
+
+      expect(config.removeSignature).toBe(true);
+      expect(config.resign).toBe(true);
+      expect(config.postjectArgs.length).toBe(2);
+    });
+  });
+
+  describe("RunOptions", () => {
+    it("should allow empty options", () => {
+      const options: RunOptions = {};
+
+      expect(options.cwd).toBeUndefined();
+      expect(options.env).toBeUndefined();
+    });
+
+    it("should allow cwd and env", () => {
+      const options: RunOptions = {
+        cwd: "/tmp",
+        env: { NODE_ENV: "test" },
+      };
+
+      expect(options.cwd).toBe("/tmp");
+      expect(options.env).toHaveProperty("NODE_ENV");
+    });
+  });
+
+  describe("ExecError", () => {
+    it("should satisfy the interface shape", () => {
+      const error: ExecError = Object.assign(new Error("command failed"), {
+        stdout: Buffer.from("output"),
+        stderr: Buffer.from("error output"),
+      });
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toBe("command failed");
+      expect(Buffer.isBuffer(error.stdout)).toBe(true);
+      expect(Buffer.isBuffer(error.stderr)).toBe(true);
+    });
+
+    it("should have readable stdout and stderr content", () => {
+      const error: ExecError = Object.assign(new Error("fail"), {
+        stdout: Buffer.from("captured stdout"),
+        stderr: Buffer.from("captured stderr"),
+      });
+
+      expect(error.stdout.toString()).toBe("captured stdout");
+      expect(error.stderr.toString()).toBe("captured stderr");
+    });
+  });
+
+  describe("LoggerOptions", () => {
+    it("should allow empty options", () => {
+      const options: LoggerOptions = {};
+      expect(options.silent).toBeUndefined();
+      expect(options.level).toBeUndefined();
+    });
+
+    it("should allow silent flag", () => {
+      const options: LoggerOptions = { silent: true };
+      expect(options.silent).toBe(true);
+    });
+
+    it("should allow level option", () => {
+      const options: LoggerOptions = { level: "warn" };
+      expect(options.level).toBe("warn");
+    });
+
+    it("should allow both silent and level", () => {
+      const options: LoggerOptions = { silent: true, level: "error" };
+      expect(options.silent).toBe(true);
+      expect(options.level).toBe("error");
+    });
+  });
+
+  describe("LogLevel", () => {
+    it("should accept all valid levels", () => {
+      const levels: readonly LogLevel[] = ["debug", "info", "warn", "error"];
+      expect(levels).toHaveLength(4);
+      expect(levels).toContain("debug");
+      expect(levels).toContain("info");
+      expect(levels).toContain("warn");
+      expect(levels).toContain("error");
+    });
+  });
+
+  describe("SpinnerHandle", () => {
+    it("should satisfy the interface shape", () => {
+      const handle: SpinnerHandle = {
+        stop: () => {},
+        fail: () => {},
+      };
+      expect(typeof handle.stop).toBe("function");
+      expect(typeof handle.fail).toBe("function");
+    });
+  });
+});

@@ -1,0 +1,1217 @@
+/**
+ * Server test setup — Node environment.
+ *
+ * Server-specific utilities that require Node.js APIs (filesystem, MCP, agent factories).
+ * Tests should import shared helpers directly from setup.ts — this file does not re-export.
+ */
+
+import type { QuantitativeDefinition } from '@orkestrel/reason'
+import type { WebSocketLike } from '@orkestrel/mcp'
+import * as fs from 'node:fs'
+import * as nodePath from 'node:path'
+import { PassThrough } from 'node:stream'
+import { MCPStoreManager } from '@orkestrel/mcp'
+import type { MCPServerInterface } from '@orkestrel/mcp'
+import type {
+	AgentManagerInterface,
+	MessageInterface,
+	MessageRole,
+	ProviderResult,
+} from '@orkestrel/agent'
+import type { PhaseContext, TaskContext, WorkflowContext } from '@orkestrel/workflow'
+import { createAgentManager, OllamaProvider } from '@orkestrel/agent'
+import { generateId } from '@orkestrel/core'
+import { createSandbox } from '@orkestrel/sandbox'
+import type { SandboxInterface } from '@orkestrel/sandbox'
+import type { PromptTemplate } from '@orkestrel/prompt'
+import type { TerminalFormInterface } from '@orkestrel/terminal'
+import { Terminal } from '@orkestrel/terminal'
+import { stripAnsi } from '@orkestrel/core'
+import { afterEach, vi } from 'vitest'
+import { OLLAMA_CONFIG, expectQuantitative } from './setup.js'
+import { createServer as createHttpServer, request } from 'node:http'
+import { createServer as createTcpServer, connect } from 'node:net'
+import type { Server as HttpServer, IncomingMessage, ServerResponse } from 'node:http'
+import type { Server as TcpServer, Socket } from 'node:net'
+import { Server, PortManager } from '@orkestrel/server'
+import type { RouteInput } from '@orkestrel/server'
+import type { JsonRpcMessage, JsonRpcResponse } from '@orkestrel/mcp'
+import { parseJsonRpcMessage } from '@orkestrel/mcp'
+
+// === MCP Test Helpers
+
+/** Builds a JSON-RPC request string */
+export function jsonRpcRequest(
+	method: string,
+	id: number | string,
+	params?: Record<string, unknown>,
+): string {
+	return JSON.stringify({
+		jsonrpc: '2.0',
+		method,
+		id,
+		...(params !== undefined ? { params } : {}),
+	})
+}
+
+/** Builds a JSON-RPC notification string (no id) */
+export function jsonRpcNotification(method: string): string {
+	return JSON.stringify({
+		jsonrpc: '2.0',
+		method,
+	})
+}
+
+/** Narrows unknown to a record for test assertions */
+export function toRecord(value: unknown): Record<string, unknown> {
+	if (typeof value === 'object' && value !== null) {
+		const result: Record<string, unknown> = {}
+		for (const [k, v] of Object.entries(value)) {
+			result[k] = v
+		}
+		return result
+	}
+	return {}
+}
+
+/** Narrows unknown to unknown[] — returns empty array if not an array */
+export function toArray(value: unknown): unknown[] {
+	return Array.isArray(value) ? value : []
+}
+
+/** Extracts the parsed JSON content from a successful MCP tool call response */
+export function parseToolContent(result: unknown): Record<string, unknown> {
+	const r = toRecord(result)
+	const content = toArray(r['content'])
+	if (content.length === 0) return {}
+	const text = toRecord(content[0])['text']
+	return toRecord(JSON.parse(String(text)))
+}
+
+// === Filesystem Helpers
+
+/** Result of creating a sandbox-backed test directory */
+export interface TestDir {
+	readonly root: string
+	readonly sandbox: SandboxInterface
+}
+
+/**
+ * Creates a sandbox-backed temporary directory pre-populated with files.
+ *
+ * @param files - Record of relative path to content
+ * @returns A TestDir with the root path and sandbox reference
+ */
+export async function createTestDir(files: Record<string, string> = {}): Promise<TestDir> {
+	const sb = await createSandbox({ symlinkNodeModules: false })
+	for (const [relativePath, content] of Object.entries(files)) {
+		await sb.write(relativePath, content)
+	}
+	return { root: sb.root, sandbox: sb }
+}
+
+/** Cleans up a test directory created by createTestDir */
+export async function destroyTestDir(dir: TestDir): Promise<void> {
+	await dir.sandbox.destroy()
+}
+
+/**
+ * Runs a callback with a sandbox-backed temporary directory, then cleans up.
+ *
+ * @param files - Record of relative path to content
+ * @param fn - Callback receiving the root path and sandbox
+ * @returns The callback's return value
+ */
+export async function withTestDir<T>(
+	files: Record<string, string>,
+	fn: (dir: TestDir) => Promise<T> | T,
+): Promise<T> {
+	const dir = await createTestDir(files)
+	try {
+		return await fn(dir)
+	} finally {
+		await destroyTestDir(dir)
+	}
+}
+
+/** Reads a file from a directory, returns its content */
+export function readFromDisk(dir: string, relativePath: string): string {
+	return fs.readFileSync(nodePath.join(dir, relativePath), 'utf-8')
+}
+
+/** Checks whether a path exists on disk */
+export function existsOnDisk(dir: string, relativePath: string): boolean {
+	return fs.existsSync(nodePath.join(dir, relativePath))
+}
+
+/** Builds a minimal quantitative definition for testing */
+export function testDef(id: string, value: number): QuantitativeDefinition {
+	return {
+		type: 'quantitative',
+		id,
+		name: `Test ${id}`,
+		groups: [
+			{
+				id: 'g1',
+				label: 'g1',
+				aggregation: 'sum',
+				factors: [{ id: 'f1', label: 'f1', source: { kind: 'static', value } }],
+			},
+		],
+		aggregation: 'sum',
+	}
+}
+
+/** Builds an MCPStoreEntry from an id and value */
+export function testEntry(
+	id: string,
+	value: number,
+): { id: string; data: Record<string, unknown> } {
+	const def = testDef(id, value)
+	const data: Record<string, unknown> = {}
+	for (const [k, v] of Object.entries(def)) {
+		data[k] = v
+	}
+	return { id, data }
+}
+
+/** Writes a JSON file to a directory */
+export function writeJson(dir: string, filename: string, content: unknown): void {
+	fs.writeFileSync(nodePath.join(dir, filename), JSON.stringify(content), 'utf8')
+}
+
+/** Creates an MCPStoreManager with stores for the given directories */
+export function storesFor(...dirs: { path: string; writable?: boolean }[]): MCPStoreManager {
+	const manager = new MCPStoreManager()
+	for (const dir of dirs) {
+		manager.create(dir)
+	}
+	return manager
+}
+
+/** Extracts value from a quantitative result — throws if wrong type */
+export function quantitativeValue(result: unknown): number {
+	const r = expectQuantitative(result)
+	return r.value
+}
+
+// === JS/TS Definition File Helpers
+
+/** Writes a JS definition file using static export default */
+export function writeJsDef(dir: string, filename: string, id: string, value: number): void {
+	const content = `export default {
+  type: "quantitative",
+  id: "${id}",
+  name: "Test ${id}",
+  groups: [{
+    id: "g1",
+    label: "g1",
+    aggregation: "sum",
+    factors: [{ id: "f1", label: "f1", source: { kind: "static", value: ${value} } }],
+  }],
+  aggregation: "sum",
+};
+`
+	fs.writeFileSync(nodePath.join(dir, filename), content, 'utf8')
+}
+
+/** Writes a JS definition file using a provider function */
+export function writeJsProviderDef(dir: string, filename: string, id: string, value: number): void {
+	const content = `export default function() {
+  return {
+    type: "quantitative",
+    id: "${id}",
+    name: "Provider ${id}",
+    groups: [{
+      id: "g1",
+      label: "g1",
+      aggregation: "sum",
+      factors: [{ id: "f1", label: "f1", source: { kind: "static", value: ${value} } }],
+    }],
+    aggregation: "sum",
+  };
+}
+`
+	fs.writeFileSync(nodePath.join(dir, filename), content, 'utf8')
+}
+
+/** Writes a JS file with invalid default export */
+export function writeInvalidJsDef(dir: string, filename: string): void {
+	const content = `export default { foo: "bar" };\n`
+	fs.writeFileSync(nodePath.join(dir, filename), content, 'utf8')
+}
+
+/** Writes a JS file with no default export */
+export function writeNoDefaultJs(dir: string, filename: string): void {
+	const content = `export const x = 42;\n`
+	fs.writeFileSync(nodePath.join(dir, filename), content, 'utf8')
+}
+
+/** Writes a JS file with a syntax error */
+export function writeBrokenJs(dir: string, filename: string): void {
+	const content = `export default {{{invalid\n`
+	fs.writeFileSync(nodePath.join(dir, filename), content, 'utf8')
+}
+
+// === MCP Client ↔ Server Bridge
+
+/** Parses a JSON-RPC body from a fetch RequestInit */
+export function parseJsonRpcBody(init: RequestInit | undefined): unknown {
+	const bodyText = typeof init?.body === 'string' ? init.body : ''
+	return JSON.parse(bodyText)
+}
+
+/** Extracts headers as a plain record from a fetch RequestInit */
+export function extractHeaders(init: RequestInit | undefined): Record<string, string> {
+	const headers = init?.headers
+	if (typeof headers === 'object' && headers !== null && !Array.isArray(headers)) {
+		const result: Record<string, string> = {}
+		for (const [k, v] of Object.entries(headers)) {
+			if (typeof v === 'string') result[k] = v
+		}
+		return result
+	}
+	return {}
+}
+
+/**
+ * Recursively validates a JSON Schema object.
+ *
+ * Returns an array of error strings. An empty array means the schema is valid.
+ */
+export function validateSchema(schema: unknown, path: string = '$'): string[] {
+	if (typeof schema !== 'object' || schema === null) return []
+	const errors: string[] = []
+	const record = schema as Record<string, unknown>
+
+	if (record['type'] === 'array' && record['items'] === undefined) {
+		errors.push(`${path}: type "array" is missing "items"`)
+	}
+
+	const oneOf = record['oneOf']
+	if (oneOf !== undefined) {
+		if (!Array.isArray(oneOf) || oneOf.length === 0) {
+			errors.push(`${path}: "oneOf" must be a non-empty array`)
+		} else {
+			for (let i = 0; i < oneOf.length; i++) {
+				errors.push(...validateSchema(oneOf[i], `${path}.oneOf[${i}]`))
+			}
+		}
+	}
+
+	const properties = record['properties']
+	if (typeof properties === 'object' && properties !== null) {
+		for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+			errors.push(...validateSchema(value, `${path}.properties.${key}`))
+		}
+	}
+
+	const items = record['items']
+	if (typeof items === 'object' && items !== null) {
+		errors.push(...validateSchema(items, `${path}.items`))
+	}
+
+	return errors
+}
+
+/**
+ * Creates a `fetch` implementation backed by a real MCPServer.
+ */
+export function createServerFetch(server: MCPServerInterface): {
+	fetch: typeof globalThis.fetch
+	sessionId: string
+	calls: { method: string; url: string; headers: Record<string, string> }[]
+} {
+	const sessionId = 'session-' + Math.random().toString(36).slice(2)
+	const calls: { method: string; url: string; headers: Record<string, string> }[] = []
+
+	const mockFetch: typeof globalThis.fetch = async (
+		input: string | URL | Request,
+		init?: RequestInit,
+	): Promise<Response> => {
+		const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+		const method = init?.method ?? 'GET'
+		const headers = extractHeaders(init)
+		calls.push({ method, url, headers })
+
+		if (method === 'DELETE') {
+			return new Response(null, { status: 200 })
+		}
+
+		let parsed: unknown
+		try {
+			parsed = parseJsonRpcBody(init)
+		} catch {
+			return new Response(
+				JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' } }),
+				{ status: 400, headers: { 'Content-Type': 'application/json' } },
+			)
+		}
+
+		if (typeof parsed !== 'object' || parsed === null) {
+			return new Response(
+				JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message: 'Invalid request' } }),
+				{ status: 400, headers: { 'Content-Type': 'application/json' } },
+			)
+		}
+
+		// Handle batch arrays: process each request individually
+		if (Array.isArray(parsed)) {
+			const responses = []
+			for (const item of parsed) {
+				const response = await server.handle(JSON.stringify(item))
+				if (response !== undefined) {
+					responses.push(response)
+				}
+			}
+			return new Response(JSON.stringify(responses), {
+				status: 200,
+				headers: {
+					'Content-Type': 'application/json',
+					'MCP-Session-Id': sessionId,
+				},
+			})
+		}
+
+		const body = parsed as Record<string, unknown>
+		const messageMethod = body.method
+
+		if (body.id === undefined && typeof messageMethod === 'string') {
+			return new Response(null, {
+				status: 202,
+				headers: { 'MCP-Session-Id': sessionId },
+			})
+		}
+
+		const message = typeof init?.body === 'string' ? init.body : JSON.stringify(parsed)
+		const response = await server.handle(message)
+
+		if (response === undefined) {
+			return new Response(null, {
+				status: 202,
+				headers: { 'MCP-Session-Id': sessionId },
+			})
+		}
+
+		return new Response(JSON.stringify(response), {
+			status: 200,
+			headers: {
+				'Content-Type': 'application/json',
+				'MCP-Session-Id': sessionId,
+			},
+		})
+	}
+
+	return { fetch: mockFetch, sessionId, calls }
+}
+
+// === Agent Test Factories
+
+const activeManagers = new Set<AgentManagerInterface>()
+
+afterEach(() => {
+	for (const manager of activeManagers) {
+		manager.destroy()
+	}
+	activeManagers.clear()
+})
+
+export function createTestProvider(model = OLLAMA_CONFIG.model): OllamaProvider {
+	return new OllamaProvider({
+		model,
+		url: OLLAMA_CONFIG.host,
+		timeout: 60_000,
+	})
+}
+
+export function createTestManager(model = OLLAMA_CONFIG.model): AgentManagerInterface {
+	const provider = createTestProvider(model)
+	const manager = createAgentManager(provider)
+	activeManagers.add(manager)
+	return manager
+}
+
+export function msg(role: MessageRole, content: string, partial = false): MessageInterface {
+	return { id: generateId(), role, content, partial }
+}
+
+// === Context Factories
+
+export function workflowContext(overrides?: Partial<WorkflowContext>): WorkflowContext {
+	return {
+		workflowId: 'wf-1',
+		name: 'Test',
+		description: '',
+		...overrides,
+	}
+}
+
+export function phaseContext(overrides?: Partial<PhaseContext>): PhaseContext {
+	return {
+		...workflowContext(),
+		phaseId: 'ph-1',
+		...overrides,
+	}
+}
+
+export function taskContext(overrides?: Partial<TaskContext>): TaskContext {
+	return {
+		...phaseContext(),
+		taskId: 'task-1',
+		...overrides,
+	}
+}
+
+// === Token Collection
+
+export async function collectTokens(generator: AsyncGenerator<string, string>): Promise<{
+	readonly tokens: readonly string[]
+	readonly result: string
+}> {
+	const tokens: string[] = []
+	for (;;) {
+		const next = await generator.next()
+		if (next.done === true) {
+			return { tokens, result: next.value }
+		}
+		tokens.push(next.value)
+	}
+}
+
+export async function collectProviderTokens(
+	generator: AsyncGenerator<string, ProviderResult>,
+): Promise<{
+	readonly tokens: readonly string[]
+	readonly result: ProviderResult
+}> {
+	const tokens: string[] = []
+	for (;;) {
+		const next = await generator.next()
+		if (next.done === true) {
+			return { tokens, result: next.value }
+		}
+		tokens.push(next.value)
+	}
+}
+
+// === Prompt Helpers
+
+export function countPrompt(to: number, from = 1): string {
+	return `Count from ${from} to ${to}, one per line.`
+}
+
+export function sayPrompt(word: string): string {
+	return `Say "${word}" and nothing else.`
+}
+
+// === Stream Helpers
+
+/** Reads all buffered content from a PassThrough stream and returns it as a string */
+export function readOutput(output: PassThrough): string {
+	const chunks: Buffer[] = []
+	let chunk = output.read()
+	while (chunk !== null) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+		chunk = output.read()
+	}
+	return stripAnsi(Buffer.concat(chunks).toString('utf8'))
+}
+
+/** Creates a Terminal with injectable PassThrough streams for testing */
+export function createTestTerminal(): {
+	terminal: TerminalFormInterface
+	input: PassThrough
+	output: PassThrough
+} {
+	const input = new PassThrough()
+	const output = new PassThrough()
+	const terminal = new Terminal({ input, output })
+	return { terminal, input, output }
+}
+
+// === Template Factories
+
+/** Standard greeting template for tests */
+export function greetingTemplate(): PromptTemplate {
+	return {
+		id: 'greeting',
+		name: 'Greeting',
+		content: 'Hello, {{name}}! Welcome to {{place}}.',
+		placeholders: [
+			{ name: 'name', required: true },
+			{ name: 'place', value: 'the system' },
+		],
+	}
+}
+
+/** Template with category and tags for search tests */
+export function taggedTemplate(id: string, category: string, tags: string[]): PromptTemplate {
+	return {
+		id,
+		name: `Template ${id}`,
+		content: `Content for ${id}`,
+		placeholders: [],
+		category,
+		tags,
+	}
+}
+
+/** Template with all optional fields populated */
+export function fullTemplate(): PromptTemplate {
+	return {
+		id: 'full',
+		name: 'Full Template',
+		content: 'Dear {{recipient}},\n\n{{body}}\n\nBest,\n{{sender}}',
+		placeholders: [
+			{ name: 'recipient', required: true, description: 'Person to address' },
+			{ name: 'body', required: true, description: 'Main content' },
+			{ name: 'sender', value: 'The Team', description: 'Sender name' },
+		],
+		summary: 'A full email template',
+		description: 'Template with all optional fields filled in',
+		category: 'communication',
+		tags: ['email', 'formal'],
+	}
+}
+
+// === Server Test Helpers
+
+/** Standard HTTP response shape returned by all request helpers */
+export interface HttpResponse {
+	readonly status: number
+	readonly headers: Record<string, string>
+	readonly body: string
+}
+
+/** A real connected socket pair via a TCP server */
+export interface SocketPair {
+	readonly client: Socket
+	readonly server: Socket
+	readonly tcp: TcpServer
+	readonly cleanup: () => void
+}
+
+/**
+ * Create a real connected socket pair.
+ *
+ * @returns SocketPair with client, server, tcp server, and cleanup
+ */
+export async function createSocketPair(): Promise<SocketPair> {
+	return new Promise((resolve) => {
+		let clientSocket: Socket
+		const tcp = createTcpServer()
+		tcp.once('connection', (serverSocket) => {
+			resolve({
+				client: clientSocket,
+				server: serverSocket,
+				tcp,
+				cleanup() {
+					clientSocket.destroy()
+					serverSocket.destroy()
+					tcp.close()
+				},
+			})
+		})
+		tcp.listen(0, '127.0.0.1', () => {
+			const addr = tcp.address()
+			const port = typeof addr === 'object' && addr !== null ? addr.port : 0
+			clientSocket = connect({ port, host: '127.0.0.1' })
+		})
+	})
+}
+
+/** A real HTTP test server with convenience methods */
+export interface TestHttpServer {
+	readonly http: HttpServer
+	readonly port: number
+	readonly captured: readonly { readonly req: IncomingMessage; readonly res: ServerResponse }[]
+	get(path: string, headers?: Record<string, string>): Promise<HttpResponse>
+	post(path: string, payload: unknown): Promise<HttpResponse>
+	raw(
+		method: string,
+		path: string,
+		body: string,
+		headers?: Record<string, string>,
+	): Promise<HttpResponse>
+	sse(path: string): Promise<HttpResponse>
+	sseUntil(path: string, target: string, timeout?: number): Promise<HttpResponse>
+	cleanup(): Promise<void>
+}
+
+/**
+ * Start a real HTTP test server.
+ *
+ * @param handler - Request handler. When omitted, responds 200 OK.
+ * @returns TestHttpServer with request helpers
+ */
+export async function createTestHttpServer(
+	handler?: (req: IncomingMessage, res: ServerResponse) => void,
+): Promise<TestHttpServer> {
+	const captured: { readonly req: IncomingMessage; readonly res: ServerResponse }[] = []
+
+	const http = createHttpServer((req, res) => {
+		captured.push({ req, res })
+		if (handler !== undefined) {
+			handler(req, res)
+		} else {
+			res.writeHead(200)
+			res.end('OK')
+		}
+	})
+
+	const port = await new Promise<number>((resolve) => {
+		http.listen(0, '127.0.0.1', () => {
+			const addr = http.address()
+			resolve(typeof addr === 'object' && addr !== null ? addr.port : 0)
+		})
+	})
+
+	function makeRequest(
+		method: string,
+		path: string,
+		headers: Record<string, string>,
+		body?: string,
+	): Promise<HttpResponse> {
+		return new Promise((resolve, reject) => {
+			const req = request({ hostname: '127.0.0.1', port, method, path, headers }, (res) => {
+				let data = ''
+				res.on('data', (chunk: Buffer) => {
+					data += chunk.toString()
+				})
+				res.on('end', () => {
+					const responseHeaders: Record<string, string> = {}
+					for (const [key, value] of Object.entries(res.headers)) {
+						if (typeof value === 'string') {
+							responseHeaders[key] = value
+						}
+					}
+					resolve({ status: res.statusCode ?? 0, headers: responseHeaders, body: data })
+				})
+			})
+			req.on('error', reject)
+			if (body !== undefined) {
+				req.write(body)
+			}
+			req.end()
+		})
+	}
+
+	function readSse(path: string): Promise<HttpResponse> {
+		return new Promise((resolve) => {
+			const req = request(
+				{ hostname: '127.0.0.1', port, method: 'GET', path },
+				(res: IncomingMessage) => {
+					const responseHeaders: Record<string, string> = {}
+					for (const [key, value] of Object.entries(res.headers)) {
+						if (typeof value === 'string') {
+							responseHeaders[key] = value
+						}
+					}
+					let data = ''
+					let resolved = false
+					const finish = () => {
+						if (resolved) return
+						resolved = true
+						req.destroy()
+						resolve({ status: res.statusCode ?? 0, headers: responseHeaders, body: data })
+					}
+					res.on('data', (chunk: Buffer) => {
+						data += chunk.toString()
+						finish()
+					})
+					res.on('end', finish)
+					setTimeout(finish, 200)
+				},
+			)
+			req.on('error', () => {
+				/* ignore ECONNRESET from destroy */
+			})
+			req.end()
+		})
+	}
+
+	function readSseUntil(path: string, target: string, timeout = 2000): Promise<HttpResponse> {
+		return new Promise((resolve) => {
+			let data = ''
+			let resolved = false
+			const responseHeaders: Record<string, string> = {}
+
+			const finish = () => {
+				if (resolved) return
+				resolved = true
+				clearTimeout(timer)
+				req.destroy()
+				resolve({ status: 200, headers: responseHeaders, body: data })
+			}
+
+			const req = request(
+				{ hostname: '127.0.0.1', port, method: 'GET', path },
+				(res: IncomingMessage) => {
+					for (const [key, value] of Object.entries(res.headers)) {
+						if (typeof value === 'string') {
+							responseHeaders[key] = value
+						}
+					}
+					res.on('data', (chunk: Buffer) => {
+						data += chunk.toString()
+						if (data.includes(target)) {
+							finish()
+						}
+					})
+					res.on('end', finish)
+				},
+			)
+			req.on('error', () => {})
+			req.end()
+
+			const timer = setTimeout(finish, timeout)
+		})
+	}
+
+	return {
+		http,
+		port,
+		captured,
+		async get(path, headers = {}) {
+			return makeRequest('GET', path, headers)
+		},
+		async post(path, payload) {
+			return makeRequest(
+				'POST',
+				path,
+				{ 'Content-Type': 'application/json' },
+				JSON.stringify(payload),
+			)
+		},
+		async raw(method, path, body, headers = {}) {
+			return makeRequest(method, path, headers, body)
+		},
+		async sse(path) {
+			return readSse(path)
+		},
+		async sseUntil(path, target, timeout) {
+			return readSseUntil(path, target, timeout)
+		},
+		async cleanup() {
+			await new Promise<void>((resolve) => {
+				http.close(() => resolve())
+			})
+		},
+	}
+}
+
+/**
+ * Create an idle Server context (not started).
+ *
+ * @remarks
+ * Useful for testing handlers that only need manager access.
+ */
+export function createServerContext(): Server {
+	return new Server({ port: 0, timeout: 100 })
+}
+
+/**
+ * Create a started Server that is held in `stopping` state.
+ *
+ * @param persist - Whether the stop should set persist flag
+ * @returns The server and a cleanup function
+ */
+export async function createStoppingServer(persist = false): Promise<{
+	readonly server: Server
+	readonly cleanup: () => void
+}> {
+	vi.useRealTimers()
+	new PortManager().clear()
+	const server = new Server({ port: 9870 + Math.floor(Math.random() * 100), timeout: 30_000 })
+
+	server.routes.register({
+		method: 'GET',
+		path: '/__hold',
+		handler: () => {
+			/* never respond — keeps request in-flight */
+		},
+	})
+
+	const allocatedPort = await server.start()
+
+	// Make a request that stays in-flight to prevent drain from completing
+	const hangingReq = request(
+		{ hostname: '127.0.0.1', port: allocatedPort, method: 'GET', path: '/__hold' },
+		() => {},
+	)
+	hangingReq.on('error', () => {
+		/* ignore */
+	})
+	hangingReq.end()
+
+	// Give the request time to reach the server
+	await new Promise((resolve) => setTimeout(resolve, 50))
+
+	server.stop({ persist })
+
+	return {
+		server,
+		cleanup() {
+			hangingReq.destroy()
+			server.stop({ force: true })
+			server.destroy()
+		},
+	}
+}
+
+/** A started Server with a known port and cleanup function */
+export interface LiveServer {
+	readonly server: Server
+	readonly port: number
+	readonly cleanup: () => void
+}
+
+/**
+ * Create a real started Server bound to an ephemeral port.
+ *
+ * @param routes - Additional route inputs to register before start
+ * @returns LiveServer with the server, port, and cleanup
+ */
+export async function createLiveServer(routes?: readonly RouteInput[]): Promise<LiveServer> {
+	vi.useRealTimers()
+	new PortManager().clear()
+	const port = 9800 + Math.floor(Math.random() * 100)
+	const server = new Server({ port, timeout: 30_000 })
+
+	// Always register a hold route for drain testing
+	server.routes.register({
+		method: 'GET',
+		path: '/__hold',
+		handler: () => {},
+	})
+
+	if (routes !== undefined) {
+		for (const route of routes) {
+			server.routes.register(route)
+		}
+	}
+
+	const allocatedPort = await server.start()
+
+	return {
+		server,
+		port: allocatedPort,
+		cleanup() {
+			server.stop({ force: true })
+			server.destroy()
+		},
+	}
+}
+
+// === Transport Test Helpers
+
+/** Builds a JSON-RPC response object */
+export function jsonRpcResponse(id: string | number | null, result: unknown): JsonRpcResponse {
+	return { jsonrpc: '2.0', id, result }
+}
+
+/** Builds a JSON-RPC error response object */
+export function jsonRpcError(
+	id: string | number | null,
+	code: number,
+	message: string,
+): JsonRpcResponse {
+	return { jsonrpc: '2.0', id, error: { code, message } }
+}
+
+/** Creates an HTTP POST request for HTTPServerTransport testing */
+export function mcpPostRequest(body: unknown, headers?: Record<string, string>): Request {
+	return new Request('http://localhost/mcp', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Accept: 'application/json, text/event-stream',
+			...headers,
+		},
+		body: JSON.stringify(body),
+	})
+}
+
+/** Creates an HTTP GET request for SSE stream testing */
+export function mcpGetRequest(headers?: Record<string, string>): Request {
+	return new Request('http://localhost/mcp', {
+		method: 'GET',
+		headers: {
+			Accept: 'text/event-stream',
+			...headers,
+		},
+	})
+}
+
+/** Creates an HTTP DELETE request for session teardown testing */
+export function mcpDeleteRequest(headers?: Record<string, string>): Request {
+	return new Request('http://localhost/mcp', {
+		method: 'DELETE',
+		headers: headers ?? {},
+	})
+}
+
+/** Reads and parses a JSON response body */
+export async function readJsonBody(response: Response): Promise<unknown> {
+	return JSON.parse(await response.text())
+}
+
+/**
+ * Reads SSE events from a response stream with a safety timeout.
+ *
+ * @param response - the SSE response
+ * @param timeoutMs - max time to wait for the stream to close (default: 2000ms)
+ * @returns parsed JSON-RPC messages from the SSE data lines
+ */
+export async function readSSEEvents(
+	response: Response,
+	timeoutMs = 2000,
+): Promise<readonly JsonRpcMessage[]> {
+	const body = response.body
+	if (!body) return []
+
+	const reader = body.getReader()
+	const decoder = new TextDecoder()
+	const events: JsonRpcMessage[] = []
+	let buffer = ''
+
+	const timeout = new Promise<void>((_, reject) => {
+		setTimeout(() => reject(new Error(`readSSEEvents timed out after ${timeoutMs}ms`)), timeoutMs)
+	})
+
+	const read = async (): Promise<void> => {
+		while (true) {
+			const { done, value } = await reader.read()
+			if (done) break
+			buffer += decoder.decode(value, { stream: true })
+			const blocks = buffer.split('\n\n')
+			buffer = blocks.pop() ?? ''
+			for (const block of blocks) {
+				for (const line of block.split('\n')) {
+					const data = line.startsWith('data: ')
+						? line.slice(6)
+						: line.startsWith('data:')
+							? line.slice(5)
+							: undefined
+					if (data !== undefined && data.length > 0) {
+						try {
+							const parsed = parseJsonRpcMessage(JSON.parse(data))
+							if (parsed) events.push(parsed)
+						} catch {
+							// skip malformed
+						}
+					}
+				}
+			}
+		}
+	}
+
+	try {
+		await Promise.race([read(), timeout])
+	} catch {
+		reader.releaseLock()
+	}
+
+	return events
+}
+
+/** Parsed SSE block with data and optional event ID */
+interface SSEBlockResult {
+	readonly data: string
+	readonly eventId: string | undefined
+}
+
+/** Parses a single SSE block into its data and event ID */
+function parseSSEBlock(block: string): SSEBlockResult {
+	let data = ''
+	let eventId: string | undefined
+	for (const line of block.split('\n')) {
+		if (line.startsWith('data: ')) {
+			data += line.slice(6)
+		} else if (line.startsWith('data:')) {
+			data += line.slice(5)
+		} else if (line.startsWith('id: ')) {
+			eventId = line.slice(4)
+		} else if (line.startsWith('id:')) {
+			eventId = line.slice(3).trimStart()
+		}
+	}
+	return { data, eventId }
+}
+
+/** SSE event with optional event ID for resumability testing */
+export interface SSEEventWithId {
+	readonly eventId: string | undefined
+	readonly message: JsonRpcMessage
+}
+
+/**
+ * Reads SSE events from a response stream, capturing event IDs.
+ *
+ * @param response - the SSE response
+ * @param timeoutMs - max time to wait for the stream to close (default: 2000ms)
+ * @returns SSE events with their assigned IDs
+ */
+export async function readSSEEventsWithIds(
+	response: Response,
+	timeoutMs = 2000,
+): Promise<readonly SSEEventWithId[]> {
+	const body = response.body
+	if (!body) return []
+
+	const reader = body.getReader()
+	const decoder = new TextDecoder()
+	const events: SSEEventWithId[] = []
+	let buffer = ''
+
+	const timeout = new Promise<void>((_, reject) => {
+		setTimeout(
+			() => reject(new Error(`readSSEEventsWithIds timed out after ${timeoutMs}ms`)),
+			timeoutMs,
+		)
+	})
+
+	const read = async (): Promise<void> => {
+		while (true) {
+			const { done, value } = await reader.read()
+			if (done) break
+			buffer += decoder.decode(value, { stream: true })
+			const blocks = buffer.split('\n\n')
+			buffer = blocks.pop() ?? ''
+			for (const block of blocks) {
+				const { data, eventId } = parseSSEBlock(block)
+				if (data.length > 0) {
+					try {
+						const parsed = parseJsonRpcMessage(JSON.parse(data))
+						if (parsed) events.push({ eventId, message: parsed })
+					} catch {
+						// skip malformed
+					}
+				}
+			}
+		}
+	}
+
+	try {
+		await Promise.race([read(), timeout])
+	} catch {
+		reader.releaseLock()
+	}
+
+	return events
+}
+
+/** Creates a mock JSON Response for HTTPClientTransport testing */
+export function mockJsonResponse(
+	body: unknown,
+	headers?: Record<string, string>,
+	status = 200,
+): Response {
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: {
+			'Content-Type': 'application/json',
+			...headers,
+		},
+	})
+}
+
+/** Creates a mock SSE Response for HTTPClientTransport testing */
+export function mockSSEResponse(events: unknown[], headers?: Record<string, string>): Response {
+	const chunks = events.map((e) => `event: message\ndata: ${JSON.stringify(e)}\n\n`).join('')
+	return new Response(chunks, {
+		status: 200,
+		headers: {
+			'Content-Type': 'text/event-stream',
+			...headers,
+		},
+	})
+}
+
+/** Creates a mock 202 Accepted Response */
+export function mockAcceptedResponse(headers?: Record<string, string>): Response {
+	return new Response(null, { status: 202, headers })
+}
+
+/** Controllable mock WebSocket for server transport testing */
+export interface MockSocket {
+	readonly socket: WebSocketLike
+	simulateMessage(data: string): void
+	simulateClose(): void
+	simulateError(): void
+}
+
+/** Creates a mock WebSocket for WebSocketServerTransport testing */
+export function createMockSocket(): MockSocket {
+	const handlers: {
+		onmessage: ((event: { readonly data: string }) => void) | null
+		onclose: (() => void) | null
+		onerror: ((event: unknown) => void) | null
+	} = { onmessage: null, onclose: null, onerror: null }
+
+	const socket: WebSocketLike = {
+		get onmessage() {
+			return handlers.onmessage
+		},
+		set onmessage(v: ((event: { readonly data: string }) => void) | null) {
+			handlers.onmessage = v
+		},
+		get onclose() {
+			return handlers.onclose
+		},
+		set onclose(v: (() => void) | null) {
+			handlers.onclose = v
+		},
+		get onerror() {
+			return handlers.onerror
+		},
+		set onerror(v: ((event: unknown) => void) | null) {
+			handlers.onerror = v
+		},
+		send: vi.fn(),
+		close: vi.fn(),
+	}
+
+	return {
+		socket,
+		simulateMessage(data: string) {
+			handlers.onmessage?.({ data })
+		},
+		simulateClose() {
+			handlers.onclose?.()
+		},
+		simulateError() {
+			handlers.onerror?.(new Error('mock error'))
+		},
+	}
+}
+
+/** Writes a JSON-RPC request line to a PassThrough stdin stream */
+export function writeStdinRequest(
+	stdin: PassThrough,
+	method: string,
+	id: number | string,
+	params?: Record<string, unknown>,
+): void {
+	const payload = JSON.stringify({
+		jsonrpc: '2.0',
+		method,
+		id,
+		...(params !== undefined ? { params } : {}),
+	})
+	stdin.write(payload + '\n')
+}
+
+/** Writes a JSON-RPC notification line to a PassThrough stdin stream */
+export function writeStdinNotification(stdin: PassThrough, method: string): void {
+	stdin.write(JSON.stringify({ jsonrpc: '2.0', method }) + '\n')
+}
+
+/** Collects stdout chunks from a PassThrough stream as strings */
+export function collectOutput(stdout: PassThrough): string[] {
+	const chunks: string[] = []
+	stdout.on('data', (chunk: Buffer) => {
+		chunks.push(chunk.toString())
+	})
+	return chunks
+}

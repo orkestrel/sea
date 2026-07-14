@@ -1,0 +1,459 @@
+import type {
+	CompressionManifest,
+	CompressionOptions,
+	CompressionResult,
+	Platform,
+	ShellOptions,
+	SizeComparison,
+} from './types.js'
+import {
+	existsSync,
+	openSync,
+	readSync,
+	readdirSync,
+	readFileSync,
+	writeSync,
+	closeSync,
+	writeFileSync,
+} from 'node:fs'
+import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
+import { resolve, relative, join, extname } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { BROTLI_EXTENSION, DEFAULT_COMPRESSION_QUALITY, PLATFORMS } from './constants.js'
+import { isRecord } from '@orkestrel/core'
+
+// === Type Guards
+
+/**
+ * Check if a value is a valid SizeComparison.
+ *
+ * @param value - Value to check
+ * @returns True when value has original, compressed, and ratio numbers
+ */
+export function isSizeComparison(value: unknown): value is SizeComparison {
+	if (!isRecord(value)) return false
+	return (
+		typeof value.original === 'number' &&
+		typeof value.compressed === 'number' &&
+		typeof value.ratio === 'number'
+	)
+}
+
+// === Platform Helpers
+
+/**
+ * Get the platform configuration for the current OS.
+ *
+ * @param platform - Platform identifier. Default: `process.platform`.
+ * @returns Platform configuration, or undefined if unsupported
+ */
+export function platformConfig(platform?: string): Platform | undefined {
+	return PLATFORMS[platform ?? process.platform]
+}
+
+/**
+ * Check if the current or specified platform is supported for SEA builds.
+ *
+ * @param platform - Platform identifier to check
+ * @returns True when the platform has a known configuration
+ */
+export function isPlatformSupported(platform?: string): boolean {
+	return (platform ?? process.platform) in PLATFORMS
+}
+
+// === Filesystem Helpers
+
+/**
+ * Assert that a path exists, throwing with a descriptive message if not.
+ *
+ * @param path - Absolute or relative path to check
+ * @param message - Error message when path is missing
+ */
+export function ensureExists(path: string, message: string): void {
+	if (!existsSync(path)) {
+		throw new Error(message)
+	}
+}
+
+/** File extensions that should NOT be Brotli-compressed */
+const SKIP_EXTENSIONS = new Set([
+	'.br',
+	'.gz',
+	'.zst',
+	'.png',
+	'.jpg',
+	'.jpeg',
+	'.gif',
+	'.webp',
+	'.avif',
+	'.ico',
+	'.woff',
+	'.woff2',
+	'.ttf',
+	'.otf',
+	'.eot',
+	'.mp3',
+	'.mp4',
+	'.webm',
+	'.ogg',
+	'.zip',
+	'.tar',
+])
+
+/**
+ * Check if a file should be Brotli-compressed based on its extension.
+ *
+ * @param filePath - Path to the file
+ * @returns True when the file type benefits from compression
+ */
+export function isCompressible(filePath: string): boolean {
+	const ext = extname(filePath).toLowerCase()
+	return !SKIP_EXTENSIONS.has(ext)
+}
+
+/**
+ * Recursively walk a directory and return all file paths.
+ *
+ * @param dir - Directory to walk
+ * @param baseDir - Base directory for relative path calculation
+ * @returns Array of relative file paths
+ */
+export function walkDirectory(dir: string, baseDir?: string): readonly string[] {
+	const base = baseDir ?? dir
+	const result: string[] = []
+	const entries = readdirSync(dir, { withFileTypes: true })
+
+	for (const entry of entries) {
+		const fullPath = join(dir, entry.name)
+		if (entry.isDirectory()) {
+			result.push(...walkDirectory(fullPath, base))
+		} else if (entry.isFile()) {
+			result.push(relative(base, fullPath))
+		}
+	}
+
+	return result
+}
+
+// === Shell Helpers
+
+/**
+ * Error thrown when a shell command fails.
+ */
+export class ShellError extends Error {
+	readonly stdout: Buffer
+	readonly stderr: Buffer
+
+	constructor(message: string, stdout: Buffer, stderr: Buffer) {
+		super(message)
+		this.name = 'ShellError'
+		this.stdout = stdout
+		this.stderr = stderr
+	}
+}
+
+/**
+ * Run a command synchronously and return stdout.
+ *
+ * @param command - Command to execute (first element is the binary)
+ * @param options - Shell options (cwd, env)
+ * @returns stdout as a Buffer
+ * @throws ShellError when the command exits with non-zero status
+ */
+export function run(command: readonly string[], options?: ShellOptions): Buffer {
+	const [cmd, ...args] = command
+	if (cmd === undefined) {
+		throw new Error('Command array must not be empty')
+	}
+	// Node v22+ blocks direct execFileSync of .cmd/.bat files without a shell (EINVAL)
+	const useShell = cmd.endsWith('.cmd') || cmd.endsWith('.bat')
+	try {
+		return execFileSync(cmd, args, {
+			cwd: options?.cwd,
+			env: options?.env !== undefined ? { ...process.env, ...options.env } : undefined,
+			stdio: ['pipe', 'pipe', 'pipe'],
+			shell: useShell,
+		})
+	} catch (thrown: unknown) {
+		if (
+			isRecord(thrown) &&
+			thrown.stdout instanceof Buffer &&
+			thrown.stderr instanceof Buffer &&
+			typeof thrown.message === 'string'
+		) {
+			throw new ShellError(thrown.message, thrown.stdout, thrown.stderr)
+		}
+		throw thrown
+	}
+}
+
+/**
+ * Split a buffer into trimmed non-empty lines.
+ *
+ * @param buffer - Buffer to split
+ * @returns Array of line strings
+ */
+export function splitLines(buffer: Buffer): readonly string[] {
+	return buffer
+		.toString('utf-8')
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+}
+
+// === Compression Helpers
+
+/**
+ * Brotli-compress a single file, writing the output alongside it.
+ *
+ * @param input - Absolute path to the source file
+ * @param output - Absolute path for the compressed output
+ * @param options - Compression options (quality, mode)
+ * @returns Compression result with size comparison
+ */
+export function compressFile(
+	input: string,
+	output: string,
+	options?: CompressionOptions,
+): CompressionResult {
+	const quality = options?.quality ?? DEFAULT_COMPRESSION_QUALITY
+	const mode = options?.mode ?? 0
+
+	const raw = readFileSync(input)
+	const compressed = brotliCompressSync(raw, {
+		params: {
+			[zlibConstants.BROTLI_PARAM_QUALITY]: quality,
+			[zlibConstants.BROTLI_PARAM_MODE]: mode,
+		},
+	})
+
+	writeFileSync(output, compressed)
+
+	return {
+		input,
+		output,
+		size: computeSize(raw.length, compressed.length),
+	}
+}
+
+/**
+ * Compress all compressible files in a directory tree.
+ *
+ * @param dirPath - Absolute path to the directory
+ * @param options - Compression options
+ * @returns Compression manifest with all results
+ */
+export function compressDirectory(
+	dirPath: string,
+	options?: CompressionOptions,
+): CompressionManifest {
+	const files = walkDirectory(dirPath)
+	const results: CompressionResult[] = []
+	let totalOriginal = 0
+	let totalCompressed = 0
+
+	for (const relativePath of files) {
+		const fullPath = resolve(dirPath, relativePath)
+		if (!isCompressible(fullPath)) continue
+
+		const outputPath = fullPath + BROTLI_EXTENSION
+		const result = compressFile(fullPath, outputPath, options)
+		results.push(result)
+		totalOriginal += result.size.original
+		totalCompressed += result.size.compressed
+	}
+
+	return {
+		generatedAt: new Date().toISOString(),
+		assets: results,
+		total: computeSize(totalOriginal, totalCompressed),
+	}
+}
+
+/**
+ * Compute a size comparison between original and compressed byte counts.
+ *
+ * @param original - Original byte count
+ * @param compressed - Compressed byte count
+ * @returns SizeComparison with ratio
+ */
+export function computeSize(original: number, compressed: number): SizeComparison {
+	const ratio = original > 0 ? compressed / original : 0
+	return { original, compressed, ratio }
+}
+
+// === PE Helpers
+
+/**
+ * Parse the PE header offset from a Windows executable.
+ *
+ * @param fd - Open file descriptor
+ * @returns The offset to the PE signature
+ */
+export function parsePeOffset(fd: number): number {
+	const buf = Buffer.alloc(4)
+	readSync(fd, buf, 0, 4, 0x3c)
+	return buf.readUInt32LE(0)
+}
+
+/**
+ * Read a 16-bit unsigned integer from a file descriptor.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to read from
+ * @returns The 16-bit value
+ */
+export function readU16(fd: number, offset: number): number {
+	const buf = Buffer.alloc(2)
+	readSync(fd, buf, 0, 2, offset)
+	return buf.readUInt16LE(0)
+}
+
+/**
+ * Write a 16-bit unsigned integer to a file descriptor.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to write at
+ * @param value - The 16-bit value to write
+ */
+export function writeU16(fd: number, offset: number, value: number): void {
+	const buf = Buffer.alloc(2)
+	buf.writeUInt16LE(value, 0)
+	writeSync(fd, buf, 0, 2, offset)
+}
+
+/**
+ * Check if a file is a Windows PE executable.
+ *
+ * @param path - Path to the file
+ * @returns True when the file has a valid PE signature
+ */
+export function isPeExecutable(path: string): boolean {
+	let fd: number | undefined
+	try {
+		fd = openSync(path, 'r')
+		const peOffset = parsePeOffset(fd)
+		const sig = Buffer.alloc(4)
+		readSync(fd, sig, 0, 4, peOffset)
+		return sig.toString('ascii') === 'PE\0\0'
+	} catch {
+		return false
+	} finally {
+		if (fd !== undefined) closeSync(fd)
+	}
+}
+
+/**
+ * Patch the PE subsystem field in a Windows executable.
+ *
+ * @param path - Path to the executable
+ * @param subsystem - Numeric subsystem value (2 = GUI, 3 = Console)
+ */
+export function patchPeSubsystem(path: string, subsystem: number): void {
+	const fd = openSync(path, 'r+')
+	try {
+		const peOffset = parsePeOffset(fd)
+		// Subsystem field is at PE offset + 0x5C (in the Optional Header)
+		writeU16(fd, peOffset + 0x5c, subsystem)
+	} finally {
+		closeSync(fd)
+	}
+}
+
+/**
+ * Remove the Authenticode signature from a PE executable by zeroing
+ * the security directory entry in the optional header.
+ *
+ * @param path - Path to the executable
+ */
+export function stripPeSignature(path: string): void {
+	const fd = openSync(path, 'r+')
+	try {
+		const peOffset = parsePeOffset(fd)
+		// COFF header: 24 bytes from PE signature
+		// Optional header magic at peOffset + 24
+		const magic = readU16(fd, peOffset + 24)
+		// PE32+ has security dir at different offset than PE32
+		const securityDirOffset = magic === 0x20b ? peOffset + 168 : peOffset + 152
+		// Zero out the 8-byte security directory entry (VirtualAddress + Size)
+		const zeroes = Buffer.alloc(8)
+		writeSync(fd, zeroes, 0, 8, securityDirOffset)
+	} finally {
+		closeSync(fd)
+	}
+}
+
+// === Formatting Helpers
+
+/**
+ * Format a byte count as a human-readable string.
+ *
+ * @param bytes - Byte count
+ * @returns Formatted string (e.g. `"1.23 MB"`, `"456 KB"`)
+ */
+export function formatSize(bytes: number): string {
+	if (bytes < 1024) return `${String(bytes)} B`
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+	return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
+
+// === SEA Helpers
+
+/**
+ * Patch the sentinel fuse in a binary from `:0` to `:1`.
+ *
+ * Searches the file in 64 MB chunks with overlap to handle any file size.
+ * The fuse signals to the Node.js runtime that a SEA blob is present.
+ * This is normally handled by the Injector but is also available as a
+ * when using native PE resource injection.
+ *
+ * @param executablePath - Absolute path to the executable
+ * @param fuse - Sentinel fuse string (without the `:0` suffix)
+ */
+export function patchSentinelFuse(executablePath: string, fuse: string): void {
+	const fd = openSync(executablePath, 'r+')
+	try {
+		const needle = Buffer.from(fuse, 'utf-8')
+		const chunkSize = 64 * 1024 * 1024 // 64 MB
+		const readSize = chunkSize + needle.length
+		const buffer = Buffer.alloc(readSize)
+
+		let offset = 0
+		while (true) {
+			const bytesRead = readSync(fd, buffer, 0, readSize, offset)
+			if (bytesRead === 0) break
+
+			const chunk = buffer.subarray(0, bytesRead)
+			const idx = chunk.indexOf(needle)
+
+			if (idx !== -1) {
+				const fuseEnd = offset + idx + needle.length
+				const valueBuf = Buffer.alloc(2)
+				const valueRead = readSync(fd, valueBuf, 0, 2, fuseEnd)
+
+				if (valueRead < 2) {
+					throw new Error('Could not read sentinel fuse value')
+				}
+
+				const value = valueBuf.toString('utf-8')
+
+				if (value === ':0') {
+					writeSync(fd, Buffer.from('1', 'utf-8'), 0, 1, fuseEnd + 1)
+					return
+				}
+
+				if (value === ':1') {
+					return // Already patched
+				}
+
+				throw new Error(`Unexpected sentinel fuse value: ${value}`)
+			}
+
+			offset += chunkSize
+		}
+
+		throw new Error(`Sentinel fuse not found in executable: ${fuse}`)
+	} finally {
+		closeSync(fd)
+	}
+}

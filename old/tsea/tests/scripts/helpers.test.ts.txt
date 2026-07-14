@@ -1,0 +1,1174 @@
+import { describe, it, expect, afterEach, vi } from "vitest";
+import {
+  isRecord,
+  isSizeComparison,
+  isExecError,
+  computeSize,
+  ensureExists,
+  walkDirectory,
+  isCompressible,
+  run,
+  splitLines,
+  resolvePostjectCommand,
+  isPeExecutable,
+  patchPeSubsystem,
+  stripPeSignature,
+  parsePeOffset,
+  readU16,
+  writeU16,
+  formatSize,
+  compressFile,
+  compressDirectory,
+  platformConfig,
+  isPlatformSupported,
+} from "../../scripts/helpers.js";
+import { PLATFORMS } from "../../scripts/constants.js";
+import {
+  writeFileSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  openSync,
+  closeSync,
+} from "node:fs";
+import { join } from "node:path";
+import { execSync } from "node:child_process";
+import {
+  createTempDir,
+  createMinimalPe,
+  createSignedPe,
+  createTestFiles,
+} from "../setupScripts.js";
+import type { TempDir } from "../setupScripts.js";
+
+describe("scripts/helpers", () => {
+  let tempDir: TempDir;
+
+  afterEach(() => {
+    if (tempDir !== undefined) {
+      tempDir.cleanup();
+    }
+  });
+
+  // === Type Guards
+
+  describe("isRecord", () => {
+    it("should return true for plain objects", () => {
+      expect(isRecord({})).toBe(true);
+      expect(isRecord({ key: "value" })).toBe(true);
+    });
+
+    it("should return false for null", () => {
+      expect(isRecord(null)).toBe(false);
+    });
+
+    it("should return false for arrays", () => {
+      expect(isRecord([])).toBe(false);
+      expect(isRecord([1, 2, 3])).toBe(false);
+    });
+
+    it("should return false for primitives", () => {
+      expect(isRecord("string")).toBe(false);
+      expect(isRecord(42)).toBe(false);
+      expect(isRecord(true)).toBe(false);
+      expect(isRecord(undefined)).toBe(false);
+    });
+  });
+
+  describe("isSizeComparison", () => {
+    it("should return true for valid SizeComparison", () => {
+      expect(isSizeComparison({ original: 100, compressed: 50, ratio: 0.5 })).toBe(true);
+    });
+
+    it("should return false for null", () => {
+      expect(isSizeComparison(null)).toBe(false);
+    });
+
+    it("should return false for array", () => {
+      expect(isSizeComparison([1, 2, 3])).toBe(false);
+    });
+
+    it("should return false for non-object", () => {
+      expect(isSizeComparison("string")).toBe(false);
+      expect(isSizeComparison(42)).toBe(false);
+      expect(isSizeComparison(undefined)).toBe(false);
+    });
+
+    it("should return false when original is not a number", () => {
+      expect(isSizeComparison({ original: "100", compressed: 50, ratio: 0.5 })).toBe(false);
+    });
+
+    it("should return false when compressed is not a number", () => {
+      expect(isSizeComparison({ original: 100, compressed: "50", ratio: 0.5 })).toBe(false);
+    });
+
+    it("should return false when ratio is not a number", () => {
+      expect(isSizeComparison({ original: 100, compressed: 50, ratio: "0.5" })).toBe(false);
+    });
+
+    it("should return false when missing fields", () => {
+      expect(isSizeComparison({ original: 100 })).toBe(false);
+      expect(isSizeComparison({ original: 100, compressed: 50 })).toBe(false);
+    });
+
+    it("should accept zero values", () => {
+      expect(isSizeComparison({ original: 0, compressed: 0, ratio: 0 })).toBe(true);
+    });
+
+    it("should accept negative ratio", () => {
+      expect(isSizeComparison({ original: 100, compressed: 200, ratio: -1 })).toBe(true);
+    });
+  });
+
+  describe("isExecError", () => {
+    it("should return true for object with stdout and stderr Buffers", () => {
+      const error = { stdout: Buffer.from("out"), stderr: Buffer.from("err") };
+      expect(isExecError(error)).toBe(true);
+    });
+
+    it("should return true for real execSync errors", () => {
+      let caught: unknown;
+      try {
+        execSync('node -e "process.exit(1)"', { stdio: "pipe" });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeDefined();
+      expect(isExecError(caught)).toBe(true);
+    });
+
+    it("should return false for plain Error", () => {
+      expect(isExecError(new Error("plain"))).toBe(false);
+    });
+
+    it("should return false for null", () => {
+      expect(isExecError(null)).toBe(false);
+    });
+
+    it("should return false for string", () => {
+      expect(isExecError("error")).toBe(false);
+    });
+
+    it("should return false when stdout is not a Buffer", () => {
+      expect(isExecError({ stdout: "text", stderr: Buffer.from("") })).toBe(false);
+    });
+
+    it("should return false when stderr is not a Buffer", () => {
+      expect(isExecError({ stdout: Buffer.from(""), stderr: "text" })).toBe(false);
+    });
+  });
+
+  // === Platform
+
+  describe("platformConfig", () => {
+    it("should return config for current platform", () => {
+      const config = platformConfig();
+
+      expect(config).toBeDefined();
+      expect(config.executable).toBeDefined();
+      expect(typeof config.removeSignature).toBe("boolean");
+      expect(typeof config.resign).toBe("boolean");
+      expect(Array.isArray(config.postjectArgs)).toBe(true);
+    });
+
+    it("should return config for win32 when platform is win32", () => {
+      Object.defineProperty(process, "platform", { value: "win32" });
+
+      const config = platformConfig();
+
+      expect(config.executable).toBe("tsea.exe");
+      expect(config.removeSignature).toBe(true);
+    });
+
+    it("should return config for darwin when platform is darwin", () => {
+      Object.defineProperty(process, "platform", { value: "darwin" });
+
+      const config = platformConfig();
+
+      expect(config.executable).toBe("tsea");
+      expect(config.removeSignature).toBe(true);
+      expect(config.resign).toBe(true);
+    });
+
+    it("should return config for linux when platform is linux", () => {
+      Object.defineProperty(process, "platform", { value: "linux" });
+
+      const config = platformConfig();
+
+      expect(config.executable).toBe("tsea");
+      expect(config.removeSignature).toBe(false);
+    });
+
+    it("should match PLATFORMS record", () => {
+      const config = platformConfig();
+      const expected = PLATFORMS[process.platform];
+
+      expect(config).toEqual(expected);
+    });
+
+    it("should return a defensive copy", () => {
+      const first = platformConfig();
+      const second = platformConfig();
+
+      expect(first).not.toBe(second);
+      expect(first).toEqual(second);
+    });
+  });
+
+  describe("isPlatformSupported", () => {
+    it("should return true for current platform", () => {
+      expect(isPlatformSupported()).toBe(true);
+    });
+
+    it("should return true for win32", () => {
+      expect(isPlatformSupported("win32")).toBe(true);
+    });
+
+    it("should return true for darwin", () => {
+      expect(isPlatformSupported("darwin")).toBe(true);
+    });
+
+    it("should return true for linux", () => {
+      expect(isPlatformSupported("linux")).toBe(true);
+    });
+
+    it("should return false for unknown platform", () => {
+      expect(isPlatformSupported("fake-os")).toBe(false);
+    });
+
+    it("should return true for all entries in PLATFORMS", () => {
+      for (const key of Object.keys(PLATFORMS)) {
+        expect(isPlatformSupported(key)).toBe(true);
+      }
+    });
+  });
+
+  // === Filesystem
+
+  describe("ensureExists", () => {
+    it("should not throw when path exists", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "exists.txt");
+      writeFileSync(filePath, "content");
+
+      expect(() => ensureExists(filePath, "File not found")).not.toThrow();
+    });
+
+    it("should throw when path does not exist", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "missing.txt");
+
+      expect(() => ensureExists(filePath, "File not found")).toThrow("File not found");
+    });
+
+    it("should not throw when directory exists", () => {
+      tempDir = createTempDir();
+
+      expect(() => ensureExists(tempDir.path, "Dir not found")).not.toThrow();
+    });
+
+    it("should throw with custom message", () => {
+      const msg = "Custom error: build artifact missing";
+      expect(() => ensureExists("/nonexistent/path", msg)).toThrow(msg);
+    });
+  });
+
+  describe("walkDirectory", () => {
+    it("should list files in a flat directory", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, { "a.txt": "a", "b.txt": "b" });
+
+      const files = walkDirectory(tempDir.path);
+
+      expect(files.length).toBe(2);
+      expect(files).toContain("a.txt");
+      expect(files).toContain("b.txt");
+    });
+
+    it("should list files in nested directories", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, { "root.txt": "root" });
+      createTestFiles(join(tempDir.path, "sub"), { "nested.txt": "nested" });
+
+      const files = walkDirectory(tempDir.path);
+
+      expect(files.length).toBe(2);
+      expect(files).toContain("root.txt");
+      expect(files.some((f) => f.includes("nested.txt"))).toBe(true);
+    });
+
+    it("should return empty array for empty directory", () => {
+      tempDir = createTempDir();
+
+      const files = walkDirectory(tempDir.path);
+
+      expect(files).toEqual([]);
+    });
+
+    it("should handle deeply nested structures", () => {
+      tempDir = createTempDir();
+      createTestFiles(join(tempDir.path, "a/b/c"), { "deep.txt": "deep" });
+
+      const files = walkDirectory(tempDir.path);
+
+      expect(files.length).toBe(1);
+      expect(files.some((f) => f.includes("deep.txt"))).toBe(true);
+    });
+
+    it("should return readonly array", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, { "file.txt": "content" });
+
+      const files = walkDirectory(tempDir.path);
+
+      expect(Array.isArray(files)).toBe(true);
+    });
+  });
+
+  describe("isCompressible", () => {
+    it("should return true for regular files", () => {
+      expect(isCompressible("index.html")).toBe(true);
+      expect(isCompressible("styles.css")).toBe(true);
+      expect(isCompressible("app.js")).toBe(true);
+    });
+
+    it("should return false for .br files", () => {
+      expect(isCompressible("index.html.br")).toBe(false);
+      expect(isCompressible("styles.css.br")).toBe(false);
+    });
+
+    it("should return false for manifest files", () => {
+      expect(isCompressible("assets-manifest.json")).toBe(false);
+      expect(isCompressible("manifest.json")).toBe(false);
+    });
+
+    it("should return true for non-manifest json files", () => {
+      expect(isCompressible("data.json")).toBe(true);
+      expect(isCompressible("config.json")).toBe(true);
+    });
+  });
+
+  // === Shell
+
+  describe("run", () => {
+    it("should execute a valid command", () => {
+      expect(() => run("node --version")).not.toThrow();
+    });
+
+    it("should throw on invalid command", () => {
+      expect(() => run("nonexistent-command-xyz")).toThrow(/Command failed/);
+    });
+
+    it("should accept custom cwd", () => {
+      tempDir = createTempDir();
+
+      expect(() => run("node --version", { cwd: tempDir.path })).not.toThrow();
+    });
+
+    it("should execute silently without writing to console", () => {
+      const logSpy = vi.spyOn(console, "log");
+      run("node -e \"console.log('hello')\"");
+
+      expect(logSpy).not.toHaveBeenCalled();
+
+      logSpy.mockRestore();
+    });
+
+    it("should include stderr in error message on failure", () => {
+      let caught: unknown;
+      try {
+        run("node -e \"console.error('oops'); process.exit(1)\"");
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      const message = caught instanceof Error ? caught.message : "";
+      expect(message).toContain("Command failed");
+      expect(message).toContain("oops");
+    });
+  });
+
+  describe("splitLines", () => {
+    it("should return empty array for null", () => {
+      expect(splitLines(null)).toEqual([]);
+    });
+
+    it("should return empty array for empty buffer", () => {
+      expect(splitLines(Buffer.from(""))).toEqual([]);
+    });
+
+    it("should split on newlines", () => {
+      expect(splitLines(Buffer.from("a\nb\nc"))).toEqual(["a", "b", "c"]);
+    });
+
+    it("should split on CRLF", () => {
+      expect(splitLines(Buffer.from("a\r\nb\r\nc"))).toEqual(["a", "b", "c"]);
+    });
+
+    it("should filter empty lines", () => {
+      expect(splitLines(Buffer.from("a\n\nb\n\n"))).toEqual(["a", "b"]);
+    });
+
+    it("should trim trailing whitespace", () => {
+      expect(splitLines(Buffer.from("hello   \nworld  "))).toEqual(["hello", "world"]);
+    });
+
+    it("should handle single line without newline", () => {
+      expect(splitLines(Buffer.from("single"))).toEqual(["single"]);
+    });
+  });
+
+  // === Size
+
+  describe("computeSize", () => {
+    it("should compute ratio from original and compressed", () => {
+      const size = computeSize(1000, 250);
+
+      expect(size.original).toBe(1000);
+      expect(size.compressed).toBe(250);
+      expect(size.ratio).toBe(0.75);
+    });
+
+    it("should return 0 ratio when original is 0", () => {
+      const size = computeSize(0, 0);
+
+      expect(size.original).toBe(0);
+      expect(size.compressed).toBe(0);
+      expect(size.ratio).toBe(0);
+    });
+
+    it("should return 0 ratio when compressed equals original", () => {
+      const size = computeSize(500, 500);
+
+      expect(size.ratio).toBe(0);
+    });
+
+    it("should return 1 ratio when compressed is 0", () => {
+      const size = computeSize(1000, 0);
+
+      expect(size.ratio).toBe(1);
+    });
+
+    it("should handle negative ratio when compressed exceeds original", () => {
+      const size = computeSize(100, 200);
+
+      expect(size.ratio).toBe(-1);
+    });
+
+    it("should preserve exact values for small numbers", () => {
+      const size = computeSize(10, 3);
+
+      expect(size.original).toBe(10);
+      expect(size.compressed).toBe(3);
+      expect(size.ratio).toBeCloseTo(0.7, 10);
+    });
+
+    it("should handle large byte counts", () => {
+      const size = computeSize(1_000_000, 250_000);
+
+      expect(size.ratio).toBe(0.75);
+    });
+  });
+
+  // === Compression
+
+  describe("compressFile", () => {
+    it("should compress a file", () => {
+      tempDir = createTempDir();
+      const inputPath = join(tempDir.path, "test.txt");
+      const outputPath = join(tempDir.path, "test.txt.br");
+      const content = "Hello, World!".repeat(100);
+
+      writeFileSync(inputPath, content);
+
+      const result = compressFile(inputPath, outputPath);
+
+      expect(result.input).toBe(inputPath);
+      expect(result.output).toBe(outputPath);
+      expect(result.size.original).toBeGreaterThan(0);
+      expect(result.size.compressed).toBeGreaterThan(0);
+      expect(result.size.compressed).toBeLessThan(result.size.original);
+      expect(result.size.ratio).toBeGreaterThan(0);
+      expect(result.size.ratio).toBeLessThan(1);
+      expect(existsSync(outputPath)).toBe(true);
+    });
+
+    it("should create compressed file with content", () => {
+      tempDir = createTempDir();
+      const inputPath = join(tempDir.path, "test.html");
+      const outputPath = join(tempDir.path, "test.html.br");
+      const content = '<html lang="en"><body>Test</body></html>'.repeat(50);
+
+      writeFileSync(inputPath, content);
+      compressFile(inputPath, outputPath);
+
+      const compressed = readFileSync(outputPath);
+      expect(compressed.length).toBeGreaterThan(0);
+    });
+
+    it("should handle custom compression quality", () => {
+      tempDir = createTempDir();
+      const inputPath = join(tempDir.path, "test.txt");
+      const outputPath = join(tempDir.path, "test.txt.br");
+      const content = "Compress me!".repeat(100);
+
+      writeFileSync(inputPath, content);
+
+      const result = compressFile(inputPath, outputPath, { quality: 6 });
+
+      expect(result.size.compressed).toBeGreaterThan(0);
+    });
+
+    it("should calculate ratio correctly", () => {
+      tempDir = createTempDir();
+      const inputPath = join(tempDir.path, "test.txt");
+      const outputPath = join(tempDir.path, "test.txt.br");
+      const content = "a".repeat(1000);
+
+      writeFileSync(inputPath, content);
+
+      const result = compressFile(inputPath, outputPath);
+
+      expect(result.size.ratio).toBe(1 - result.size.compressed / result.size.original);
+    });
+
+    it("should handle custom compression mode", () => {
+      tempDir = createTempDir();
+      const inputPath = join(tempDir.path, "test.txt");
+      const outputPath = join(tempDir.path, "test.txt.br");
+      const content = "Mode test!".repeat(100);
+
+      writeFileSync(inputPath, content);
+
+      const result = compressFile(inputPath, outputPath, { mode: 0 });
+
+      expect(result.size.compressed).toBeGreaterThan(0);
+      expect(existsSync(outputPath)).toBe(true);
+    });
+
+    it("should handle single-byte file", () => {
+      tempDir = createTempDir();
+      const inputPath = join(tempDir.path, "tiny.txt");
+      const outputPath = join(tempDir.path, "tiny.txt.br");
+
+      writeFileSync(inputPath, "x");
+
+      const result = compressFile(inputPath, outputPath);
+
+      expect(result.size.original).toBe(1);
+      expect(result.size.compressed).toBeGreaterThan(0);
+    });
+  });
+
+  describe("compressDirectory", () => {
+    it("should compress all eligible files in a directory", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, {
+        "file1.html": '<html lang="en">Test 1</html>'.repeat(50),
+        "file2.css": "body { color: red; }".repeat(50),
+        "file3.js": 'console.log("test");'.repeat(50),
+      });
+
+      const manifest = compressDirectory(tempDir.path);
+
+      expect(manifest.assets.length).toBe(3);
+      expect(manifest.total.original).toBeGreaterThan(0);
+      expect(manifest.total.compressed).toBeGreaterThan(0);
+      expect(manifest.total.compressed).toBeLessThan(manifest.total.original);
+      expect(manifest.total.ratio).toBeGreaterThan(0);
+      expect(manifest.generatedAt).toBeDefined();
+    });
+
+    it("should skip already compressed files", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, {
+        "file.html": '<html lang="en">Test</html>'.repeat(50),
+        "file.html.br": "already compressed",
+      });
+
+      const manifest = compressDirectory(tempDir.path);
+
+      expect(manifest.assets.length).toBe(1);
+      expect(manifest.assets[0]?.input).toContain("file.html");
+      expect(manifest.assets[0]?.input).not.toContain(".br");
+    });
+
+    it("should skip manifest files", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, {
+        "data.json": '{"test": true}',
+        "assets-manifest.json": '{"manifest": true}',
+      });
+
+      const manifest = compressDirectory(tempDir.path);
+
+      expect(manifest.assets.length).toBe(1);
+      expect(manifest.assets[0]?.input).toContain("data.json");
+    });
+
+    it("should handle nested directories", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, { "root.txt": "root".repeat(50) });
+      createTestFiles(join(tempDir.path, "subdir"), { "nested.txt": "nested".repeat(50) });
+
+      const manifest = compressDirectory(tempDir.path);
+
+      expect(manifest.assets.length).toBe(2);
+    });
+
+    it("should handle empty directory", () => {
+      tempDir = createTempDir();
+
+      const manifest = compressDirectory(tempDir.path);
+
+      expect(manifest.assets.length).toBe(0);
+      expect(manifest.total.original).toBe(0);
+      expect(manifest.total.compressed).toBe(0);
+      expect(manifest.total.ratio).toBe(0);
+    });
+
+    it("should calculate total ratio correctly", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, {
+        "file1.txt": "a".repeat(1000),
+        "file2.txt": "b".repeat(1000),
+      });
+
+      const manifest = compressDirectory(tempDir.path);
+
+      const expectedRatio = 1 - manifest.total.compressed / manifest.total.original;
+      expect(manifest.total.ratio).toBeCloseTo(expectedRatio, 10);
+    });
+
+    it("should create compressed files in same directory", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, {
+        "test.html": '<html lang="en">Test</html>'.repeat(50),
+      });
+
+      compressDirectory(tempDir.path);
+
+      expect(existsSync(join(tempDir.path, "test.html.br"))).toBe(true);
+    });
+
+    it("should produce valid generatedAt ISO timestamp", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, { "file.txt": "content".repeat(50) });
+
+      const manifest = compressDirectory(tempDir.path);
+      const parsed = new Date(manifest.generatedAt);
+
+      expect(parsed.getTime()).not.toBeNaN();
+    });
+
+    it("should set output path with .br extension", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, { "style.css": "body{}".repeat(50) });
+
+      const manifest = compressDirectory(tempDir.path);
+
+      expect(manifest.assets[0]?.output).toMatch(/\.br$/);
+    });
+
+    it("should pass options to individual files", () => {
+      tempDir = createTempDir();
+      createTestFiles(tempDir.path, { "file.txt": "quality test".repeat(100) });
+
+      const lowQ = compressDirectory(tempDir.path, { quality: 1 });
+
+      // Clean up the .br file for re-compression
+      rmSync(join(tempDir.path, "file.txt.br"));
+
+      const highQ = compressDirectory(tempDir.path, { quality: 11 });
+
+      expect(highQ.total.compressed).toBeLessThanOrEqual(lowQ.total.compressed);
+    });
+  });
+
+  // === Build
+
+  describe("resolvePostjectCommand", () => {
+    it("should include the output path", () => {
+      const cmd = resolvePostjectCommand("./dist/tsea.exe", {
+        executable: "tsea.exe",
+        removeSignature: false,
+        resign: false,
+        postjectArgs: [],
+      });
+
+      expect(cmd).toContain("tsea.exe");
+    });
+
+    it("should include sentinel fuse", () => {
+      const cmd = resolvePostjectCommand("./dist/tsea.exe", {
+        executable: "tsea.exe",
+        removeSignature: false,
+        resign: false,
+        postjectArgs: [],
+      });
+
+      expect(cmd).toContain("NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2");
+    });
+
+    it("should include platform-specific postject args", () => {
+      const cmd = resolvePostjectCommand("./dist/tsea", {
+        executable: "tsea",
+        removeSignature: true,
+        resign: true,
+        postjectArgs: ["--macho-segment-name", "NODE_SEA"],
+      });
+
+      expect(cmd).toContain("--macho-segment-name");
+      expect(cmd).toContain("NODE_SEA");
+    });
+
+    it("should include NODE_SEA_BLOB resource name", () => {
+      const cmd = resolvePostjectCommand("./dist/tsea.exe", {
+        executable: "tsea.exe",
+        removeSignature: false,
+        resign: false,
+        postjectArgs: [],
+      });
+
+      expect(cmd).toContain("NODE_SEA_BLOB");
+    });
+  });
+
+  // === PE
+
+  // === PE Utilities
+
+  describe("parsePeOffset", () => {
+    it("should return PE header offset for a valid PE", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "valid.exe");
+      writeFileSync(pePath, createMinimalPe());
+
+      const fd = openSync(pePath, "r");
+      try {
+        const offset = parsePeOffset(fd);
+        expect(offset).toBe(0x80);
+      } finally {
+        closeSync(fd);
+      }
+    });
+
+    it("should return -1 for non-MZ file", () => {
+      tempDir = createTempDir();
+      const txtPath = join(tempDir.path, "text.txt");
+      writeFileSync(txtPath, "not a PE file at all");
+
+      const fd = openSync(txtPath, "r");
+      try {
+        expect(parsePeOffset(fd)).toBe(-1);
+      } finally {
+        closeSync(fd);
+      }
+    });
+
+    it("should return -1 for MZ without valid PE signature", () => {
+      tempDir = createTempDir();
+      const fakePath = join(tempDir.path, "fake.exe");
+      const buf = Buffer.alloc(256, 0);
+      buf[0] = 0x4d;
+      buf[1] = 0x5a;
+      buf.writeUInt32LE(0x80, 0x3c);
+      // No PE signature at 0x80
+      writeFileSync(fakePath, buf);
+
+      const fd = openSync(fakePath, "r");
+      try {
+        expect(parsePeOffset(fd)).toBe(-1);
+      } finally {
+        closeSync(fd);
+      }
+    });
+
+    it("should return -1 for empty file", () => {
+      tempDir = createTempDir();
+      const emptyPath = join(tempDir.path, "empty.bin");
+      writeFileSync(emptyPath, Buffer.alloc(0));
+
+      const fd = openSync(emptyPath, "r");
+      try {
+        expect(parsePeOffset(fd)).toBe(-1);
+      } finally {
+        closeSync(fd);
+      }
+    });
+
+    it("should work with signed PE files", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "signed.exe");
+      writeFileSync(pePath, createSignedPe());
+
+      const fd = openSync(pePath, "r");
+      try {
+        expect(parsePeOffset(fd)).toBe(0x80);
+      } finally {
+        closeSync(fd);
+      }
+    });
+  });
+
+  describe("readU16", () => {
+    it("should read a 16-bit LE value from a file", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "data.bin");
+      const buf = Buffer.alloc(16, 0);
+      buf.writeUInt16LE(0xabcd, 4);
+      writeFileSync(filePath, buf);
+
+      const fd = openSync(filePath, "r");
+      try {
+        expect(readU16(fd, 4)).toBe(0xabcd);
+      } finally {
+        closeSync(fd);
+      }
+    });
+
+    it("should read zero from zeroed buffer", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "zeros.bin");
+      writeFileSync(filePath, Buffer.alloc(16, 0));
+
+      const fd = openSync(filePath, "r");
+      try {
+        expect(readU16(fd, 0)).toBe(0);
+      } finally {
+        closeSync(fd);
+      }
+    });
+
+    it("should read max u16 value", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "max.bin");
+      const buf = Buffer.alloc(4, 0);
+      buf.writeUInt16LE(0xffff, 0);
+      writeFileSync(filePath, buf);
+
+      const fd = openSync(filePath, "r");
+      try {
+        expect(readU16(fd, 0)).toBe(0xffff);
+      } finally {
+        closeSync(fd);
+      }
+    });
+
+    it("should read PE subsystem from minimal PE", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "pe.exe");
+      writeFileSync(pePath, createMinimalPe(2));
+
+      const fd = openSync(pePath, "r");
+      try {
+        // Subsystem is at peOffset (0x80) + 0x5C = 0xDC
+        expect(readU16(fd, 0xdc)).toBe(2);
+      } finally {
+        closeSync(fd);
+      }
+    });
+  });
+
+  describe("writeU16", () => {
+    it("should write a 16-bit LE value to a file", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "write.bin");
+      writeFileSync(filePath, Buffer.alloc(16, 0));
+
+      const fd = openSync(filePath, "r+");
+      try {
+        writeU16(fd, 4, 0x1234);
+      } finally {
+        closeSync(fd);
+      }
+
+      const result = readFileSync(filePath);
+      expect(result.readUInt16LE(4)).toBe(0x1234);
+    });
+
+    it("should not corrupt adjacent bytes", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "adjacent.bin");
+      const buf = Buffer.alloc(16, 0xaa);
+      writeFileSync(filePath, buf);
+
+      const fd = openSync(filePath, "r+");
+      try {
+        writeU16(fd, 4, 0x5678);
+      } finally {
+        closeSync(fd);
+      }
+
+      const result = readFileSync(filePath);
+      expect(result.readUInt16LE(4)).toBe(0x5678);
+      // Adjacent bytes unchanged
+      expect(result[3]).toBe(0xaa);
+      expect(result[6]).toBe(0xaa);
+    });
+
+    it("should overwrite existing value", () => {
+      tempDir = createTempDir();
+      const filePath = join(tempDir.path, "overwrite.bin");
+      const buf = Buffer.alloc(4, 0);
+      buf.writeUInt16LE(0x1111, 0);
+      writeFileSync(filePath, buf);
+
+      const fd = openSync(filePath, "r+");
+      try {
+        writeU16(fd, 0, 0x2222);
+      } finally {
+        closeSync(fd);
+      }
+
+      const result = readFileSync(filePath);
+      expect(result.readUInt16LE(0)).toBe(0x2222);
+    });
+  });
+
+  describe("isPeExecutable", () => {
+    it("should return false for non-PE files", () => {
+      tempDir = createTempDir();
+      const txtPath = join(tempDir.path, "test.txt");
+      writeFileSync(txtPath, "hello world");
+
+      expect(isPeExecutable(txtPath)).toBe(false);
+    });
+
+    it("should return false for files shorter than DOS header", () => {
+      tempDir = createTempDir();
+      const shortPath = join(tempDir.path, "short.bin");
+      writeFileSync(shortPath, Buffer.alloc(1));
+
+      expect(isPeExecutable(shortPath)).toBe(false);
+    });
+
+    it("should return true for valid PE files", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "test.exe");
+      writeFileSync(pePath, createMinimalPe());
+
+      expect(isPeExecutable(pePath)).toBe(true);
+    });
+
+    it("should return false for file with MZ but invalid PE signature", () => {
+      tempDir = createTempDir();
+      const fakePath = join(tempDir.path, "fake.exe");
+      const buf = Buffer.alloc(256, 0);
+      buf[0] = 0x4d;
+      buf[1] = 0x5a;
+      buf.writeUInt32LE(0x80, 0x3c);
+      // Wrong PE signature
+      buf[0x80] = 0x00;
+      buf[0x81] = 0x00;
+      writeFileSync(fakePath, buf);
+
+      expect(isPeExecutable(fakePath)).toBe(false);
+    });
+  });
+
+  describe("patchPeSubsystem", () => {
+    it("should patch console subsystem to windows", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "patch.exe");
+      writeFileSync(pePath, createMinimalPe(3)); // CUI = 3
+
+      const patched = patchPeSubsystem(pePath, 2); // GUI = 2
+
+      expect(patched).toBe(true);
+
+      const result = readFileSync(pePath);
+      expect(result.readUInt16LE(0xdc)).toBe(2);
+    });
+
+    it("should return false when subsystem already matches", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "already.exe");
+      writeFileSync(pePath, createMinimalPe(2));
+
+      const patched = patchPeSubsystem(pePath, 2);
+
+      expect(patched).toBe(false);
+    });
+
+    it("should patch windows subsystem back to console", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "revert.exe");
+      writeFileSync(pePath, createMinimalPe(2)); // GUI = 2
+
+      const patched = patchPeSubsystem(pePath, 3); // CUI = 3
+
+      expect(patched).toBe(true);
+
+      const result = readFileSync(pePath);
+      expect(result.readUInt16LE(0xdc)).toBe(3);
+    });
+
+    it("should throw for non-PE files", () => {
+      tempDir = createTempDir();
+      const txtPath = join(tempDir.path, "bad.txt");
+      writeFileSync(txtPath, "not a PE");
+
+      expect(() => patchPeSubsystem(txtPath, 2)).toThrow("Not a PE executable");
+    });
+
+    it("should throw for file with MZ but invalid PE signature", () => {
+      tempDir = createTempDir();
+      const fakePath = join(tempDir.path, "broken.exe");
+      const buf = Buffer.alloc(256, 0);
+      buf[0] = 0x4d;
+      buf[1] = 0x5a;
+      buf.writeUInt32LE(0x80, 0x3c);
+      // No PE signature at 0x80
+      writeFileSync(fakePath, buf);
+
+      expect(() => patchPeSubsystem(fakePath, 2)).toThrow("Not a PE executable");
+    });
+
+    it("should not corrupt other PE data", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "preserve.exe");
+      const buf = createMinimalPe(3);
+      // Write some marker data elsewhere
+      buf[0x10] = 0xaa;
+      buf[0x20] = 0xbb;
+      writeFileSync(pePath, buf);
+
+      patchPeSubsystem(pePath, 2);
+
+      const result = readFileSync(pePath);
+      // Subsystem changed
+      expect(result.readUInt16LE(0xdc)).toBe(2);
+      // Other data preserved
+      expect(result[0x10]).toBe(0xaa);
+      expect(result[0x20]).toBe(0xbb);
+      // DOS magic preserved
+      expect(result[0]).toBe(0x4d);
+      expect(result[1]).toBe(0x5a);
+    });
+  });
+
+  describe("stripPeSignature", () => {
+    it("should strip signature from a signed PE", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "signed.exe");
+      writeFileSync(pePath, createSignedPe());
+
+      const stripped = stripPeSignature(pePath);
+
+      expect(stripped).toBe(true);
+
+      // File should be truncated — no cert data at the end
+      const result = statSync(pePath);
+      expect(result.size).toBe(512);
+    });
+
+    it("should zero the certificate table directory entry", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "signed.exe");
+      writeFileSync(pePath, createSignedPe());
+
+      stripPeSignature(pePath);
+
+      const result = readFileSync(pePath);
+      // Certificate Table entry at 0x128 should be zeroed
+      expect(result.readUInt32LE(0x128)).toBe(0);
+      expect(result.readUInt32LE(0x12c)).toBe(0);
+    });
+
+    it("should return false for PE without signature", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "unsigned.exe");
+      writeFileSync(pePath, createMinimalPe());
+
+      const stripped = stripPeSignature(pePath);
+
+      expect(stripped).toBe(false);
+    });
+
+    it("should preserve PE header data after stripping", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "preserve.exe");
+      writeFileSync(pePath, createSignedPe());
+
+      stripPeSignature(pePath);
+
+      const result = readFileSync(pePath);
+      // DOS magic preserved
+      expect(result[0]).toBe(0x4d);
+      expect(result[1]).toBe(0x5a);
+      // PE signature preserved
+      expect(result[0x80]).toBe(0x50);
+      expect(result[0x81]).toBe(0x45);
+      // PE32+ magic preserved
+      expect(result.readUInt16LE(0x98)).toBe(0x20b);
+    });
+
+    it("should throw for non-PE files", () => {
+      tempDir = createTempDir();
+      const txtPath = join(tempDir.path, "bad.txt");
+      writeFileSync(txtPath, "not a PE");
+
+      expect(() => stripPeSignature(txtPath)).toThrow("Not a PE executable");
+    });
+
+    it("should throw for file with MZ but invalid PE signature", () => {
+      tempDir = createTempDir();
+      const fakePath = join(tempDir.path, "broken.exe");
+      const buf = Buffer.alloc(256, 0);
+      buf[0] = 0x4d;
+      buf[1] = 0x5a;
+      buf.writeUInt32LE(0x80, 0x3c);
+      writeFileSync(fakePath, buf);
+
+      expect(() => stripPeSignature(fakePath)).toThrow("Not a PE executable");
+    });
+
+    it("should not affect subsystem after stripping", () => {
+      tempDir = createTempDir();
+      const pePath = join(tempDir.path, "subsystem.exe");
+      writeFileSync(pePath, createSignedPe(2));
+
+      stripPeSignature(pePath);
+
+      const result = readFileSync(pePath);
+      expect(result.readUInt16LE(0xdc)).toBe(2);
+    });
+  });
+
+  // === Formatting
+
+  describe("formatSize", () => {
+    it("should format bytes as KB for values under 1MB", () => {
+      expect(formatSize(1024)).toBe("1.0KB");
+      expect(formatSize(512)).toBe("0.5KB");
+      expect(formatSize(51200)).toBe("50.0KB");
+    });
+
+    it("should format bytes as MB for values >= 1MB", () => {
+      expect(formatSize(1048576)).toBe("1.0MB");
+      expect(formatSize(5242880)).toBe("5.0MB");
+      expect(formatSize(90177536)).toBe("86.0MB");
+    });
+
+    it("should handle zero", () => {
+      expect(formatSize(0)).toBe("0.0KB");
+    });
+
+    it("should handle fractional KB", () => {
+      expect(formatSize(1536)).toBe("1.5KB");
+    });
+
+    it("should handle fractional MB", () => {
+      expect(formatSize(1572864)).toBe("1.5MB");
+    });
+
+    it("should use one decimal place", () => {
+      // 1234 bytes = 1.205... KB → "1.2KB"
+      expect(formatSize(1234)).toBe("1.2KB");
+    });
+  });
+});

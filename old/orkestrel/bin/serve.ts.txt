@@ -1,0 +1,667 @@
+/**
+ * Serve
+ *
+ * HTTP server that hosts a browser-based chat interface powered by
+ * pure TypeScript GGUF inference. Loads the model on startup, serves
+ * the showcase SPA, and exposes inference over HTTP/SSE endpoints.
+ *
+ * Endpoints:
+ * - GET  /              — serves the SPA (single-file HTML)
+ * - GET  /api/health    — SSE health stream
+ * - GET  /api/config    — model configuration JSON
+ * - POST /api/tokenize  — encode text to token ids
+ * - POST /api/chat      — streaming chat via SSE (accepts JSON, streams tokens)
+ *
+ * Usage: node dist/bin/serve.js [model_path]
+ */
+
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { existsSync, readFileSync } from 'node:fs'
+import type {
+	GenerateOptions,
+	ModelInterface,
+	SessionInterface,
+	TokenizerInterface,
+} from '@orkestrel/inference'
+import {
+	createModel,
+	createNodeTensorStore,
+	createSession,
+	createTokenizer,
+} from '@orkestrel/inference'
+import type { RouteHandlerContext } from '@orkestrel/server'
+import {
+	corsMiddleware,
+	createServer,
+	handleHealth,
+	parseJsonBody,
+	securityHeadersMiddleware,
+	sendErrorResponse,
+	sendHtml,
+	sendJson,
+} from '@orkestrel/server'
+import type { WritableTarget } from '@orkestrel/core'
+import { createLogger, isRecord } from '@orkestrel/core'
+import {
+	BOX_ROUND,
+	ICON_CHECK,
+	LABEL_BOLD,
+	LABEL_CYAN,
+	LABEL_DIM,
+	LABEL_GREEN,
+	renderBox,
+} from '@orkestrel/terminal'
+import { parseArgs } from 'node:util'
+
+// === Fallback SPA HTML
+//
+// Self-contained chat interface served when the built showcase is not available.
+// Uses vanilla JS + CSS — no framework dependencies.
+
+const FALLBACK_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Orkestrel — Inference Chat</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--surface:#1a1b26;--border:#2a2b3d;--text:#c0caf5;--muted:#565f89;--primary:#7aa2f7;--user-bg:#292e42;--assist-bg:#1e2030;--input-bg:#1a1b26}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column}
+header{padding:8px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;background:var(--surface)}
+header h1{font-size:14px;font-weight:600}
+header span{font-size:11px;color:var(--muted);background:var(--bg);padding:2px 8px;border-radius:4px}
+#messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:80%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-self:flex-end;background:var(--primary);color:#1a1b26;border-bottom-right-radius:4px}
+.msg.assistant{align-self:flex-start;background:var(--assist-bg);border:1px solid var(--border);border-bottom-left-radius:4px}
+.stats{text-align:center;font-size:11px;color:var(--muted);padding:4px}
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:var(--muted);gap:8px}
+.empty h2{font-size:16px;font-weight:500;color:var(--text)}
+.empty p{font-size:13px}
+#config{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:11px;margin-top:12px;padding:8px 12px;background:var(--surface);border-radius:8px;border:1px solid var(--border)}
+footer{padding:8px 16px;border-top:1px solid var(--border);background:var(--surface);display:flex;gap:8px;align-items:end}
+textarea{flex:1;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:14px;font-family:inherit;resize:none;outline:none;min-height:38px;max-height:120px}
+textarea:focus{border-color:var(--primary)}
+textarea:disabled{opacity:.5}
+button{background:var(--primary);color:#1a1b26;border:none;border-radius:8px;padding:8px 16px;font-size:14px;cursor:pointer;font-weight:500}
+button:disabled{opacity:.4;cursor:default}
+button:hover:not(:disabled){filter:brightness(1.1)}
+.btn-sm{padding:6px 10px;font-size:12px;background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--muted);border-top-color:var(--primary);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+<h1>Orkestrel</h1>
+<span>Inference Chat</span>
+<div style="flex:1"></div>
+<button class="btn-sm" onclick="clearChat()" title="Clear conversation">Clear</button>
+</header>
+<div id="messages">
+<div class="empty" id="empty">
+<h2>Start a conversation</h2>
+<p id="status">Connecting...</p>
+<div id="config"></div>
+</div>
+</div>
+<footer>
+<textarea id="input" rows="1" placeholder="Type a message..." disabled
+onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+<button id="sendBtn" onclick="send()" disabled>Send</button>
+</footer>
+<script>
+const msgs=document.getElementById('messages')
+const input=document.getElementById('input')
+const sendBtn=document.getElementById('sendBtn')
+const empty=document.getElementById('empty')
+const status=document.getElementById('status')
+const configEl=document.getElementById('config')
+let generating=false,messages=[],lastStats=null
+
+async function init(){
+try{
+const r=await fetch('/api/config')
+if(!r.ok)throw new Error('Server not ready')
+const c=await r.json()
+status.textContent='Model loaded — type a message below'
+configEl.innerHTML=\`<div><b>Arch:</b> \${c.architecture}</div><div><b>Layers:</b> \${c.layers}</div><div><b>Dim:</b> \${c.embedDim}</div><div><b>Heads:</b> \${c.heads}/\${c.kvHeads}</div><div><b>FFN:</b> \${c.ffnDim}</div><div><b>Vocab:</b> \${c.vocabSize?.toLocaleString()}</div><div><b>Context:</b> \${c.maxSeqLen?.toLocaleString()}</div><div><b>Cache:</b> \${c.cachedPosition??0}</div>\`
+input.disabled=false;sendBtn.disabled=false;input.focus()
+}catch{status.innerHTML='<span style="color:#f7768e">Server not available — retrying...</span>';setTimeout(init,3000)}
+}
+
+function addMsg(role,content){
+if(empty.style.display!=='none')empty.style.display='none'
+const d=document.createElement('div')
+d.className='msg '+role
+d.textContent=content
+msgs.appendChild(d)
+msgs.scrollTop=msgs.scrollHeight
+return d
+}
+
+function addStats(s){
+if(!s)return
+const d=document.createElement('div')
+d.className='stats'
+let t=s.totalTokens+' tokens · '+(s.decodeTimeMs/1000).toFixed(1)+'s · '+s.decodeTokPerSec+' tok/s'
+if(s.prefillTokPerSec)t+=' · prefill '+s.prefillTokPerSec+' tok/s'
+if(s.cachedPosition)t+=' · cache '+s.cachedPosition
+d.textContent=t
+msgs.appendChild(d)
+msgs.scrollTop=msgs.scrollHeight
+}
+
+async function send(){
+const text=input.value.trim()
+if(!text||generating)return
+input.value='';generating=true;sendBtn.disabled=true;input.disabled=true;lastStats=null
+messages.push({role:'user',content:text})
+addMsg('user',text)
+const el=addMsg('assistant','')
+
+try{
+const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages,maxTokens:512,temperature:0.7})})
+if(!r.ok){const e=await r.json().catch(()=>({message:'Failed'}));el.textContent='Error: '+(e.message||r.statusText);return}
+const reader=r.body.getReader(),dec=new TextDecoder()
+let buf='',evt='',content=''
+while(true){
+const{done,value}=await reader.read()
+if(done)break
+buf+=dec.decode(value,{stream:true})
+const lines=buf.split('\\n');buf=lines.pop()
+for(const ln of lines){
+if(ln.startsWith('event: '))evt=ln.slice(7)
+else if(ln.startsWith('data: ')&&evt){
+try{const d=JSON.parse(ln.slice(6))
+if(evt==='token'&&d.text){content+=d.text;el.textContent=content;msgs.scrollTop=msgs.scrollHeight}
+else if(evt==='done'){lastStats=d;messages.push({role:'assistant',content})}
+else if(evt==='error'){el.textContent+='\\nError: '+d.message}
+}catch{}
+evt=''
+}}
+}
+addStats(lastStats)
+}catch(e){el.textContent='Error: '+e.message}
+finally{generating=false;sendBtn.disabled=false;input.disabled=false;input.focus()}
+}
+
+function clearChat(){
+messages=[];lastStats=null
+msgs.innerHTML='<div class="empty" id="empty"><h2>Start a conversation</h2><p>Cleared — start a new conversation</p></div>'
+fetch('/api/clear',{method:'POST'}).catch(()=>{})
+}
+
+init()
+<\/script>
+</body>
+</html>`
+
+// === Chat Template
+
+/**
+ * Build a token id array with proper special token handling.
+ *
+ * Qwen3 chat format:
+ *   <|im_start|>system\n{system}<|im_end|>\n
+ *   <|im_start|>user\n{user}<|im_end|>\n
+ *   <|im_start|>assistant\n
+ */
+function formatPrompt(
+	tokenizer: TokenizerInterface,
+	imStartId: number,
+	imEndId: number,
+	systemMessage: string,
+	history: readonly { readonly role: string; readonly content: string }[],
+): readonly number[] {
+	const ids: number[] = []
+
+	// System message
+	ids.push(imStartId)
+	ids.push(...tokenizer.encode('system\n' + systemMessage, false))
+	ids.push(imEndId)
+	ids.push(...tokenizer.encode('\n', false))
+
+	// Conversation history
+	for (const msg of history) {
+		ids.push(imStartId)
+		ids.push(...tokenizer.encode(msg.role + '\n' + msg.content, false))
+		ids.push(imEndId)
+		ids.push(...tokenizer.encode('\n', false))
+	}
+
+	// Assistant prefix — model generates from here
+	ids.push(imStartId)
+	ids.push(...tokenizer.encode('assistant\n', false))
+
+	return ids
+}
+
+// === Banner
+
+function renderBanner(
+	output: WritableTarget,
+	options: { readonly port: number; readonly model: string; readonly config: string },
+): void {
+	const lines = [
+		`${LABEL_CYAN(LABEL_BOLD('orkestrel'))} ${LABEL_DIM('inference server')}`,
+		'',
+		`${LABEL_DIM('http')}    ${LABEL_CYAN(`http://localhost:${options.port}`)}`,
+		`${LABEL_DIM('chat')}    ${LABEL_CYAN(`http://localhost:${options.port}/`)}`,
+		`${LABEL_DIM('api')}     ${LABEL_CYAN(`http://localhost:${options.port}/api/chat`)}`,
+		'',
+		`${LABEL_DIM('model')}   ${options.model}`,
+		`${LABEL_DIM('config')}  ${options.config}`,
+		'',
+		`${ICON_CHECK} ${LABEL_GREEN(LABEL_BOLD('Ready'))}`,
+	]
+
+	const box = renderBox(lines.join('\n'), BOX_ROUND, 2, undefined, undefined)
+	output.write('\n')
+	for (const line of box) {
+		output.write(`  ${line}\n`)
+	}
+	output.write('\n')
+}
+
+// === Main
+
+;(async () => {
+	const { values: flags } = parseArgs({
+		options: {
+			port: { type: 'string', short: 'p', default: '3002' },
+			model: { type: 'string', short: 'm' },
+			verbose: { type: 'boolean', short: 'v', default: false },
+		},
+		strict: false,
+	})
+
+	const verbose = flags.verbose === true
+	const output = process.stderr
+
+	const logger = createLogger('serve', {
+		level: verbose ? 'debug' : 'info',
+		stdout: output,
+		stderr: output,
+	})
+
+	// Resolve model path
+	const scriptDir = dirname(fileURLToPath(import.meta.url))
+	const projectRoot = resolve(scriptDir, '../..')
+	const modelPath =
+		typeof flags.model === 'string'
+			? resolve(flags.model)
+			: process.argv[2] !== undefined
+				? resolve(process.argv[2])
+				: resolve(projectRoot, 'models/qwen3-vl-2b-instruct.gguf')
+
+	// === Load Model
+
+	logger.info(`Loading model: ${modelPath}`)
+	const loadStart = performance.now()
+
+	let tokenizer: TokenizerInterface
+	let model: ModelInterface
+	let inferenceSession: SessionInterface
+	let imStartId: number
+	let imEndId: number
+
+	const maxSeqLen = 2048
+
+	try {
+		const store = createNodeTensorStore({ path: modelPath })
+		logger.info(`GGUF v${String(store.version)} — ${String(store.tensorCount)} tensors`)
+
+		tokenizer = createTokenizer({ store })
+		logger.info(`Vocabulary: ${String(tokenizer.size)} tokens`)
+
+		model = createModel({
+			store,
+			maxSeqLen,
+			onProgress: (msg) => logger.debug(msg),
+		})
+
+		inferenceSession = createSession({ model, tokenizer, maxSeqLen })
+
+		const loadSec = ((performance.now() - loadStart) / 1000).toFixed(1)
+		logger.success(
+			`Model loaded in ${loadSec}s — ${String(model.config.layers)} layers, ${String(model.config.embedDim)}d, ${String(model.config.heads)} heads`,
+		)
+
+		// Verify chat tokens
+		const start = tokenizer.id('<|im_start|>')
+		const end = tokenizer.id('<|im_end|>')
+		if (start === undefined || end === undefined) {
+			throw new Error('Chat tokens <|im_start|>/<|im_end|> not found in vocabulary')
+		}
+		imStartId = start
+		imEndId = end
+	} catch (error) {
+		logger.error(`Failed to load model: ${error instanceof Error ? error.message : String(error)}`)
+		process.exit(1)
+	}
+
+	// === HTTP Server
+
+	const httpPort = Number(flags.port)
+	const httpServer = createServer({ port: httpPort, timeout: 300_000 })
+
+	// Register middleware
+	httpServer.middlewares.register([securityHeadersMiddleware(), corsMiddleware('*')])
+
+	// Health endpoint
+	httpServer.routes.register({
+		method: 'GET',
+		path: '/api/health',
+		handler: handleHealth,
+	})
+
+	// SPA root — serve the built showcase HTML or a fallback
+	const showcasePath = resolve(projectRoot, 'dist/showcase/index.html')
+	const showcaseHtml = existsSync(showcasePath) ? readFileSync(showcasePath, 'utf-8') : undefined
+
+	httpServer.routes.register({
+		method: 'GET',
+		path: '/',
+		handler({ response: res }: RouteHandlerContext) {
+			if (showcaseHtml !== undefined) {
+				sendHtml(res, showcaseHtml)
+			} else {
+				sendHtml(res, FALLBACK_HTML)
+			}
+		},
+	})
+
+	// Active generation — only one at a time for single-model server
+	let generating = false
+
+	// === GET /api/config — model configuration
+
+	httpServer.routes.register({
+		method: 'GET',
+		path: '/api/config',
+		handler({ response: res }: RouteHandlerContext) {
+			sendJson(res, {
+				architecture: model.config.architecture,
+				embedDim: model.config.embedDim,
+				layers: model.config.layers,
+				heads: model.config.heads,
+				kvHeads: model.config.kvHeads,
+				headDim: model.config.headDim,
+				ffnDim: model.config.ffnDim,
+				vocabSize: model.config.vocabSize,
+				contextLength: model.config.contextLength,
+				maxSeqLen,
+				eosId: tokenizer.eosId,
+				bosId: tokenizer.bosId,
+				cachedPosition: inferenceSession.cachedPosition,
+			})
+		},
+	})
+
+	// === POST /api/tokenize — encode text to tokens
+
+	httpServer.routes.register({
+		method: 'POST',
+		path: '/api/tokenize',
+		async handler({ request: req, response: res }: RouteHandlerContext) {
+			const bodyResult = await parseJsonBody(req, 1024 * 64)
+			if (!bodyResult.success) {
+				sendErrorResponse(res, 400, bodyResult.error.message)
+				return
+			}
+
+			const body = bodyResult.value
+			if (!isRecord(body) || typeof body.text !== 'string') {
+				sendErrorResponse(res, 422, 'Missing required field: text')
+				return
+			}
+
+			const addBos = typeof body.addBos === 'boolean' ? body.addBos : true
+			const ids = tokenizer.encode(body.text, addBos)
+			sendJson(res, { ids, count: ids.length })
+		},
+	})
+
+	// === POST /api/chat — streaming chat via SSE
+
+	httpServer.routes.register({
+		method: 'POST',
+		path: '/api/chat',
+		async handler({ request: req, response: res }: RouteHandlerContext) {
+			if (generating) {
+				sendErrorResponse(res, 429, 'Generation already in progress')
+				return
+			}
+
+			const bodyResult = await parseJsonBody(req, 1024 * 256)
+			if (!bodyResult.success) {
+				sendErrorResponse(res, 400, bodyResult.error.message)
+				return
+			}
+
+			const body = bodyResult.value
+			if (!isRecord(body)) {
+				sendErrorResponse(res, 422, 'Invalid request body')
+				return
+			}
+
+			// Extract messages array
+			const messages = Array.isArray(body.messages) ? body.messages : []
+			if (messages.length === 0) {
+				sendErrorResponse(res, 422, 'Missing required field: messages (non-empty array)')
+				return
+			}
+
+			// Validate messages
+			const history: { role: string; content: string }[] = []
+			for (const msg of messages) {
+				if (!isRecord(msg) || typeof msg.role !== 'string' || typeof msg.content !== 'string') {
+					sendErrorResponse(res, 422, 'Each message must have role and content strings')
+					return
+				}
+				history.push({ role: msg.role, content: msg.content })
+			}
+
+			// Extract options
+			const systemMessage =
+				typeof body.system === 'string'
+					? body.system
+					: 'You are a helpful assistant. Be concise and clear.'
+
+			const maxTokens =
+				typeof body.maxTokens === 'number' && body.maxTokens > 0
+					? Math.min(body.maxTokens, 4096)
+					: 512
+
+			const temperature =
+				typeof body.temperature === 'number' && body.temperature >= 0
+					? Math.min(body.temperature, 2.0)
+					: 0.7
+
+			// Clear model cache if requested
+			if (body.clearCache === true) {
+				inferenceSession.clear()
+			}
+
+			generating = true
+
+			// SSE response
+			res.writeHead(200, {
+				'Content-Type': 'text/event-stream',
+				'Cache-Control': 'no-cache',
+				Connection: 'keep-alive',
+			})
+
+			const writeEvent = (event: string, data: unknown): void => {
+				try {
+					res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+				} catch {
+					// Connection closed
+				}
+			}
+
+			let closed = false
+			req.on('close', () => {
+				closed = true
+			})
+
+			try {
+				// Build prompt
+				const promptIds = formatPrompt(tokenizer, imStartId, imEndId, systemMessage, history)
+
+				writeEvent('status', {
+					phase: 'prefill',
+					promptTokens: promptIds.length,
+					cachedPosition: inferenceSession.cachedPosition,
+				})
+
+				const stopTokenIds = [tokenizer.eosId, imEndId, imStartId]
+
+				const genStart = performance.now()
+				let prefillTime = 0
+				let decodeTokenCount = 0
+				const responseTokens: number[] = []
+
+				// Track think blocks for suppression
+				let inThinkBlock = false
+				let pendingText = ''
+
+				const options: GenerateOptions = {
+					maxTokens,
+					temperature,
+					topK: 40,
+					topP: 0.9,
+					repeatPenalty: 1.1,
+					stopTokens: stopTokenIds,
+					onPrefill: (current, total) => {
+						if (current === total) {
+							prefillTime = performance.now() - genStart
+							writeEvent('status', {
+								phase: 'decode',
+								prefillTokens: total,
+								prefillTimeMs: Math.round(prefillTime),
+								prefillTokPerSec: parseFloat((total / (prefillTime / 1000)).toFixed(2)),
+							})
+						}
+					},
+				}
+
+				for await (const tokenId of inferenceSession.generate(promptIds, options)) {
+					if (closed) break
+
+					responseTokens.push(tokenId)
+					decodeTokenCount++
+
+					const tokenText = tokenizer.decode([tokenId])
+					pendingText += tokenText
+
+					// Handle <think> blocks — buffer and suppress
+					if (!inThinkBlock && pendingText.includes('<think>')) {
+						const idx = pendingText.indexOf('<think>')
+						if (idx > 0) {
+							writeEvent('token', { text: pendingText.slice(0, idx) })
+						}
+						inThinkBlock = true
+						pendingText = pendingText.slice(idx + 7)
+						continue
+					}
+
+					if (inThinkBlock) {
+						if (pendingText.includes('</think>')) {
+							const idx = pendingText.indexOf('</think>')
+							pendingText = pendingText.slice(idx + 8)
+							inThinkBlock = false
+							if (pendingText.length > 0) {
+								writeEvent('token', { text: pendingText })
+								pendingText = ''
+							}
+						}
+						continue
+					}
+
+					// Stream tokens — flush when safe (no partial special token risk)
+					if (pendingText.length > 0 && !pendingText.includes('<')) {
+						writeEvent('token', { text: pendingText })
+						pendingText = ''
+					} else if (pendingText.length > 10) {
+						writeEvent('token', { text: pendingText })
+						pendingText = ''
+					}
+				}
+
+				// Flush remaining text
+				if (pendingText.length > 0 && !inThinkBlock) {
+					writeEvent('token', { text: pendingText })
+				}
+
+				const totalTime = performance.now() - genStart
+				const decodeTime = totalTime - prefillTime
+				const decodeTps =
+					decodeTime > 0 ? parseFloat((decodeTokenCount / (decodeTime / 1000)).toFixed(2)) : 0
+
+				writeEvent('done', {
+					totalTokens: decodeTokenCount,
+					totalTimeMs: Math.round(totalTime),
+					decodeTimeMs: Math.round(decodeTime),
+					decodeTokPerSec: decodeTps,
+					cachedPosition: inferenceSession.cachedPosition,
+					responseText: tokenizer.decode(responseTokens),
+				})
+			} catch (error) {
+				writeEvent('error', {
+					message: error instanceof Error ? error.message : String(error),
+				})
+			} finally {
+				generating = false
+				res.end()
+			}
+		},
+	})
+
+	// === POST /api/clear — clear KV cache
+
+	httpServer.routes.register({
+		method: 'POST',
+		path: '/api/clear',
+		handler({ response: res }: RouteHandlerContext) {
+			inferenceSession.clear()
+			sendJson(res, { success: true, cachedPosition: inferenceSession.cachedPosition })
+		},
+	})
+
+	// === Start Server
+
+	const allocatedPort = await httpServer.start()
+
+	const configSummary = `${String(model.config.layers)}L/${String(model.config.embedDim)}d/${String(model.config.heads)}H`
+
+	renderBanner(output, {
+		port: allocatedPort,
+		model: modelPath,
+		config: configSummary,
+	})
+
+	logger.ready(`Inference server at http://localhost:${allocatedPort}`)
+
+	// === Graceful Shutdown
+
+	let shuttingDown = false
+
+	function shutdown(): void {
+		if (shuttingDown) return
+		shuttingDown = true
+
+		logger.info('Shutting down...')
+		inferenceSession.destroy()
+		httpServer.stop()
+		logger.success('Shutdown complete')
+
+		setTimeout(() => process.exit(0), 500)
+	}
+
+	process.on('SIGINT', shutdown)
+	process.on('SIGTERM', shutdown)
+})()

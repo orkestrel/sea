@@ -1,0 +1,864 @@
+import {
+	createReason,
+	createQuantitativeReasoner,
+	createLogicalReasoner,
+	createSymbolicReasoner,
+	createInferentialReasoner,
+} from '@orkestrel/reason'
+import {
+	createMCPServer,
+	createMCPStoreManager,
+	createHTTPServerTransport,
+	WebSocketServerTransport,
+	ReasonTool,
+	FileSystemTool,
+	InterpretTool,
+	AgentTool,
+	SandboxTool,
+	PromptTool,
+	WorkflowTool,
+	DEFAULT_REASON_DEFINITIONS_DIR,
+	DEFAULT_FILESYSTEM_SNAPSHOTS_DIR,
+	DEFAULT_INTERPRET_TEMPLATES_DIR,
+	DEFAULT_PROMPT_TEMPLATES_DIR,
+	DEFAULT_WORKFLOW_SNAPSHOTS_DIR,
+} from '@orkestrel/mcp'
+import { createFileSystem } from '@orkestrel/filesystem'
+import { createInterpret, DEFAULT_TEMPLATES } from '@orkestrel/interpret'
+import { createAgentManager, createOllamaProvider } from '@orkestrel/agent'
+import { createWorkflowsManager } from '@orkestrel/workflow'
+import { createPrompt, createTemplateManager, createPromptClient } from '@orkestrel/prompt'
+import { createTerminal } from '@orkestrel/terminal'
+import {
+	createServer,
+	createWebSocketUpgradeHandler,
+	sendJson,
+	sendErrorResponse,
+	parseJsonBody,
+	corsMiddleware,
+	securityHeadersMiddleware,
+	tokenMiddleware,
+	defaultRoutes,
+	resolveUrl,
+	toWebRequest,
+	writeWebResponse,
+} from '@orkestrel/server'
+import type { RouteHandlerContext } from '@orkestrel/server'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { WritableTarget, ToolInterface } from '@orkestrel/core'
+import { createLogger, isRecord, HEADER_TOKEN } from '@orkestrel/core'
+import {
+	renderBox,
+	ICON_CHECK,
+	ICON_WARNING,
+	LABEL_CYAN,
+	LABEL_DIM,
+	LABEL_BOLD,
+	LABEL_GREEN,
+	BOX_ROUND,
+	SEPARATOR,
+} from '@orkestrel/terminal'
+import * as nodePath from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { parseArgs } from 'node:util'
+import { spawn } from 'node:child_process'
+import { isSea } from 'node:sea'
+
+// === SEA Detection
+
+/** Whether the process is running as a Node.js Single Executable Application */
+const sealed = isSea()
+
+// === TUI Rendering
+
+/** Render polished startup banner to stderr */
+function renderBanner(
+	output: WritableTarget,
+	options: {
+		port: number
+		tools: readonly ToolInterface[]
+	},
+): void {
+	const toolNames = options.tools.map((t) => t.name).join(LABEL_DIM(' · '))
+
+	const lines = [
+		`${LABEL_CYAN(LABEL_BOLD('orkestrel'))} ${LABEL_DIM('v0.0.1')}`,
+		'',
+		`${LABEL_DIM('stdio')}   JSON-RPC`,
+		`${LABEL_DIM('http')}    ${LABEL_CYAN(`http://localhost:${options.port}/mcp`)}`,
+		`${LABEL_DIM('ws')}      ${LABEL_CYAN(`ws://localhost:${options.port}/mcp`)}`,
+		`${LABEL_DIM('prompt')}  ${LABEL_CYAN(`http://localhost:${options.port}/api/prompts`)}`,
+		'',
+		`${LABEL_DIM('tools')}   ${toolNames}`,
+		'',
+		`${ICON_CHECK} ${LABEL_GREEN(LABEL_BOLD('Ready'))}`,
+	]
+
+	const box = renderBox(lines.join('\n'), BOX_ROUND, 2, undefined, undefined)
+	output.write('\n')
+	for (const line of box) {
+		output.write(`  ${line}\n`)
+	}
+	output.write('\n')
+}
+
+/** Render polished companion startup banner */
+function renderCompanionBanner(output: WritableTarget, url: string): void {
+	const lines = [
+		`${LABEL_CYAN(LABEL_BOLD('orkestrel'))} ${LABEL_DIM('companion')}`,
+		'',
+		`${LABEL_DIM('Connecting to')} ${LABEL_CYAN(url)}`,
+	]
+
+	const box = renderBox(lines.join('\n'), BOX_ROUND, 2, undefined, undefined)
+	output.write('\n')
+	for (const line of box) {
+		output.write(`  ${line}\n`)
+	}
+	output.write('\n')
+}
+
+// === Main — wrapped in async IIFE so the bundle works as CJS (no top-level await)
+
+;(async () => {
+	// === CLI Flags
+
+	const { values: flags } = parseArgs({
+		options: {
+			verbose: { type: 'boolean', short: 'v', default: false },
+			companion: { type: 'boolean', default: false },
+			port: { type: 'string', short: 'p' },
+			url: { type: 'string', short: 'u' },
+			token: { type: 'string', short: 't' },
+		},
+		strict: false,
+	})
+
+	const verbose = flags.verbose === true
+
+	// === Companion Mode
+	//
+	// When --companion is passed, act as the prompt companion client:
+	// connect to the SSE endpoint, display prompts, collect input, POST answers.
+	// This replaces the separate bin/prompt.ts.
+
+	if (flags.companion === true) {
+		const companionLogger = createLogger('prompt', {
+			level: 'debug',
+			silent: !verbose,
+		})
+
+		const portOverride = flags.port !== undefined ? Number(flags.port) : undefined
+		const urlOverride = typeof flags.url === 'string' ? flags.url : undefined
+		const tokenOverride = typeof flags.token === 'string' ? flags.token : undefined
+
+		const discovery = resolveUrl({
+			port: portOverride,
+			url: urlOverride,
+			endpoint: '/api/prompts',
+		})
+
+		const discoveredToken = tokenOverride ?? discovery.token
+
+		// Render styled companion banner
+		renderCompanionBanner(process.stdout, discovery.url)
+
+		const client = createPromptClient({
+			url: discovery.url,
+			token: discoveredToken,
+			terminal: createTerminal(),
+			onConnected: () => {
+				process.stdout.write(`  ${ICON_CHECK} Connected — waiting for prompts\n`)
+				process.stdout.write(`  ${SEPARATOR(48)}\n`)
+			},
+			onDisconnected: () => {
+				process.stdout.write(`\n  ${ICON_WARNING} Server disconnected — reconnecting...\n`)
+			},
+			onError: (error) => companionLogger.error(error.message),
+			onExpired: (id) => companionLogger.warn(`Prompt expired: ${id}`),
+		})
+
+		if (discoveredToken !== undefined) {
+			companionLogger.debug('Authenticated via token')
+		}
+
+		await client.connect()
+
+		// connect() resolves when the client is destroyed (e.g. server shutdown event)
+		process.exit(0)
+	}
+
+	// === Server Mode (default)
+
+	// All output goes to stderr — stdout is reserved for MCP JSON-RPC on stdio
+	const output = process.stderr
+
+	const logger = createLogger('orkestrel', {
+		level: verbose ? 'debug' : 'info',
+		stdout: output,
+		stderr: output,
+	})
+
+	// Resolve the project root.
+	// In SEA mode, the executable lives in the target directory — use its parent as root.
+	// In dev mode, resolve from the script location (dist/bin/mcp.js → project root).
+	// process.cwd() is unreliable — IDEs like WebStorm set it to their own install directory.
+	const projectRoot = sealed
+		? nodePath.dirname(process.execPath)
+		: nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), '../..')
+	const storagePath = nodePath.resolve(projectRoot, DEFAULT_REASON_DEFINITIONS_DIR)
+	const snapshotPath = nodePath.resolve(projectRoot, DEFAULT_FILESYSTEM_SNAPSHOTS_DIR)
+	const templatePath = nodePath.resolve(projectRoot, DEFAULT_INTERPRET_TEMPLATES_DIR)
+	const promptTemplatePath = nodePath.resolve(projectRoot, DEFAULT_PROMPT_TEMPLATES_DIR)
+	const workflowSnapshotPath = nodePath.resolve(projectRoot, DEFAULT_WORKFLOW_SNAPSHOTS_DIR)
+
+	// Wire up a Reason instance with all four reasoners
+	const reason = createReason({
+		reasoners: [
+			createQuantitativeReasoner(),
+			createLogicalReasoner(),
+			createSymbolicReasoner(),
+			createInferentialReasoner(),
+		],
+	})
+
+	// Set up stores — writable persistence for definitions
+	const stores = createMCPStoreManager()
+	stores.create({ path: storagePath })
+
+	// Expose a single tool with memory, persist, and storage support
+	const reasonTool = new ReasonTool({
+		name: 'reason',
+		summary:
+			'Deterministic computation coprocessor for math, logic, symbolic algebra, and inference.',
+		description: [
+			'Deterministic computation coprocessor. Performs quantitative (factor-based numeric),',
+			'logical (rule-based deductive), symbolic (equation-solving), and inferential',
+			'(fact-derivation with proof trees) reasoning.',
+			'',
+			'Pass a "definition" object describing the reasoning rules and a "subject" object',
+			'with the data to reason about. Returns a typed result with value/conclusion/solutions/derived',
+			'facts, and full trace.',
+			'',
+			'Use this tool whenever you need guaranteed-correct math, logic, symbolic algebra,',
+			'or inference — never hallucinate these computations.',
+			'',
+			'Four reasoning types are available:',
+			'- **quantitative**: Factor-based numeric scoring with groups, weights, bounds, and aggregation (sum/product/average/min/max).',
+			'- **logical**: Rule-based deductive reasoning with forward/backward chaining. Premises use atom/compound expressions.',
+			'- **symbolic**: Equation solving. Define equations with variables, constants, and operations (+, -, *, /, ^, etc.).',
+			'- **inferential**: Fact derivation with proof trees and confidence propagation. Uses pattern matching with `?varName` bindings.',
+			'',
+			'Key capabilities:',
+			'- Pass `subject` for a single evaluation, or `subjects` (array) for batch evaluation.',
+			'- Use `memory: true` to store a definition for reuse by `definitionId` in later calls.',
+			'- Use `persist: true` to save a definition to disk (survives restarts).',
+			'- Use `import` with a file path to load a definition from a .json, .js, .mjs, .ts, or .mts file.',
+			'- Use `forget` to remove stored definitions (string for one, true for all).',
+			'',
+			'When to use each type:',
+			'- Need a numeric score from weighted factors? → quantitative',
+			'- Need to evaluate if-then rules or derive conclusions? → logical',
+			'- Need to solve equations or compute formulas? → symbolic',
+			'- Need to derive new facts from existing ones with confidence? → inferential',
+			'',
+			'Always prefer this tool over manual computation. It returns full traces for transparency.',
+		].join('\n'),
+		reason,
+		memory: true,
+		stores,
+	})
+
+	// Wire up a FileSystem tool with a workspace rooted at the project directory
+	const filesystem = createFileSystem({ root: projectRoot })
+
+	// Set up snapshot stores for cross-session workspace durability
+	const snapshotStores = createMCPStoreManager()
+	snapshotStores.create({ path: snapshotPath })
+
+	const filesystemTool = new FileSystemTool({
+		name: 'filesystem',
+		summary: 'In-memory filesystem for safe file editing with snapshot persistence.',
+		description: [
+			'In-memory filesystem for safe file editing. Loads files from disk into a workspace,',
+			'lets you make changes freely, and persists only when ready.',
+			'',
+			'Supported operations:',
+			'- **scan**: Discover files and directories with metadata under a path.',
+			'- **stat**: Get metadata for a single path without loading content.',
+			'- **search**: Pattern-match across disk files (supports regex).',
+			'- **open**: Load files from disk into the workspace.',
+			'- **read**: Read file content or a line/column range from the workspace.',
+			'- **write**: Create or overwrite files in the workspace (full or range).',
+			'- **prepend**: Insert content before the first character of a file.',
+			'- **append**: Insert content after the last character of a file.',
+			'- **move**: Rename or move a file within the workspace.',
+			'- **remove**: Mark files for deletion (persisted on `persist`).',
+			'- **list**: List all files and their states in the workspace.',
+			'- **revert**: Undo workspace changes for one, many, or all files.',
+			'- **persist**: Write dirty workspace files to disk.',
+			'- **snapshot**: Serialize the workspace to a JSON-safe snapshot (auto-saved to `.orkestrel/snapshots`).',
+			'- **restore**: Replace the workspace with a previous snapshot (pass snapshot id or object).',
+			'',
+			'All edits happen in memory first. Nothing touches disk until you call `persist`.',
+			'Use `scan` to discover files, `open` to load them, edit with `write`/`prepend`/`append`,',
+			'then `persist` to save changes to disk.',
+			'',
+			'Snapshots are automatically saved to `.orkestrel/snapshots` and loaded on startup.',
+			'If a session is lost, use `restore` with a snapshot id to resume where you left off.',
+		].join('\n'),
+		filesystem,
+		stores: snapshotStores,
+	})
+
+	// Wire up an Interpret tool with a session and template persistence
+	const interpreter = createInterpret({
+		session: crypto.randomUUID(),
+		templates: DEFAULT_TEMPLATES,
+	})
+
+	const templateStores = createMCPStoreManager()
+	templateStores.create({ path: templatePath })
+
+	const interpretTool = new InterpretTool({
+		name: 'interpret',
+		summary:
+			'Natural language interpretation pipeline for converting text into structured computation inputs.',
+		description: [
+			'Natural language interpretation pipeline. Converts free-form text into structured',
+			'computation inputs (Subject + ReasonDefinition) for deterministic reasoning.',
+			'',
+			'Supported operations:',
+			'- **interpret**: Full pipeline — normalize → parse → clarify → format → generate.',
+			'  Returns prompt, subject, definition, confidence, mappings, and stage traces.',
+			'- **describe**: Reverse direction — structured inputs → natural-language prompt.',
+			'  Pass `subject` and `definition` to produce a human-readable description.',
+			'- **normalize**: Clean and standardize input text (expand contractions, fix typos).',
+			'- **parse**: Tokenize and extract intent + entities from normalized text.',
+			'- **templates**: List all registered domain templates.',
+			'',
+			'Use this tool to bridge natural language and the reason tool.',
+			'Interpret produces the Subject + Definition that reason consumes.',
+		].join('\n'),
+		interpreter,
+		memory: true,
+		stores: templateStores,
+	})
+
+	// Wire up an Agent tool backed by Ollama for sub-agent orchestration
+	const ollamaUrl = process.env.OLLAMA_HOST ?? 'http://localhost:11434'
+	const ollamaTimeout = 120_000
+	const ollamaProvider = createOllamaProvider({
+		model: process.env.OLLAMA_MODEL ?? 'qwen3.5:35b-a3b-q4_K_M',
+		url: ollamaUrl,
+		timeout: ollamaTimeout,
+	})
+	const agentManager = createAgentManager(ollamaProvider)
+
+	const agentTool = new AgentTool({
+		name: 'agent',
+		summary: 'Invoke a specialized custom agent to handle specific tasks autonomously.',
+		description: [
+			'Invoke a specialized custom agent to handle specific tasks autonomously.',
+			'The agent will receive a task description and execute it using its configured tools and model.',
+			'Use this when you need to delegate work to a specialized agent with specific capabilities.',
+			'',
+			'You can optionally provide:',
+			'- **model**: Model name to use for this invocation (overrides the default model).',
+			'- **instructions**: Behavioral directives for the child agent (e.g. style, constraints).',
+			'- **documents**: Reference files or code snippets the child agent should consider.',
+			'- **images**: Base64-encoded images for multimodal inference.',
+			'- **messages**: Conversation history to seed the child agent with prior context.',
+			'- **tools**: A list of tool names to restrict which tools the child agent can use.',
+			'  When omitted, all pre-configured tools are available.',
+			"- **scope**: Fine-grained visibility control over the child agent's context.",
+			'  Restrict which instructions, documents, images, or messages are visible.',
+			"- **timeout**: Time limit in milliseconds for the child agent's execution.",
+			'- **budget**: Token budget to limit how many tokens the child agent may consume.',
+			'',
+			'Model management:',
+			'- Set `models: true` to list all available models from the provider (no task required).',
+			'- Set `model` to a model name to override the default model for a single invocation.',
+		].join('\n'),
+		manager: agentManager,
+		tools: [reasonTool, filesystemTool, interpretTool],
+		url: ollamaUrl,
+		timeout: ollamaTimeout,
+	})
+
+	// Wire up a Sandbox tool for on-disk isolated file operations
+	const sandboxTool = new SandboxTool({
+		name: 'sandbox',
+		summary:
+			'Isolated on-disk temporary directories with guarded file operations and process execution.',
+		description: [
+			'On-disk sandbox for isolated temporary directories with guarded file operations',
+			'and sandboxed process execution. Unlike the filesystem tool (in-memory workspace),',
+			'the sandbox operates directly on disk — suitable for subprocess execution,',
+			'real file I/O, and agent work directories.',
+			'',
+			'Supported operations:',
+			'- **create**: Create a new isolated sandbox directory.',
+			'- **writeFile**: Write text content to a file within a sandbox.',
+			'- **readFile**: Read a text file from a sandbox.',
+			'- **readDir**: List directory entries within a sandbox.',
+			'- **ensureDir**: Ensure a directory exists within a sandbox.',
+			'- **ensureFile**: Ensure a file exists with content, creating parent directories.',
+			'- **remove**: Remove a file or directory within a sandbox.',
+			'- **stat**: Get file or directory stats.',
+			'- **exists**: Check whether a path exists.',
+			'- **execute**: Run a command as a child process within a sandbox.',
+			'- **cleanup**: Delete a sandbox and all its contents.',
+			'- **list**: List all active sandboxes.',
+			'',
+			'All paths are guarded against traversal outside the sandbox root.',
+			'Use `create` to get a sandbox id, then pass that id to all other operations.',
+			'Use `cleanup` to destroy a sandbox when done, or `list` to see all active sandboxes.',
+		].join('\n'),
+	})
+
+	// Wire up a Workflow tool for declarative workflow tracking
+	const workflowManager = createWorkflowsManager()
+
+	const workflowSnapshotStores = createMCPStoreManager()
+	workflowSnapshotStores.create({ path: workflowSnapshotPath })
+
+	// Create the Prompt early so the workflow tool can bridge blocked tasks
+	const prompt = createPrompt({ timeout: 300_000 })
+
+	const workflowTool = new WorkflowTool({
+		name: 'workflow',
+		summary: 'Declarative workflow tracking with phases, tasks, and lifecycle management.',
+		description: [
+			'Declarative workflow tracking system for organizing work into phases and tasks.',
+			'Workflows are blueprints — they track status and progress but do not execute work.',
+			'Consumers advance tasks by calling start, complete, block, skip, etc.',
+			'',
+			'Supported operations:',
+			'- **create**: Create a new workflow from a definition with phases and tasks.',
+			'- **status**: Get workflow progress, task statuses, and results.',
+			"- **advance**: Change a task's status (start, complete, skip, block, unblock, fail, pause, resume).",
+			'- **snapshot**: Serialize workflow state for persistence.',
+			'- **restore**: Rebuild a workflow from a saved snapshot (pass snapshot id or object).',
+			'- **list**: List all active workflows and saved snapshots.',
+			'- **remove**: Remove a workflow by id.',
+			'',
+			'Task lifecycle: pending → active → done/skipped/blocked/error.',
+			'Blocked tasks carry a reason in `result.error`. Use `unblock` to resume.',
+			"Workflow and phase status is derived from their children's statuses.",
+			'',
+			'Snapshots are JSON-serializable and can be persisted to disk for cross-session durability.',
+		].join('\n'),
+		manager: workflowManager,
+		stores: workflowSnapshotStores,
+		onBlocked(result, task) {
+			// Bridge blocked tasks to the remote prompt system
+			const blockReason = result.error ?? 'Task is blocked'
+			const taskName = task.context.name || task.context.taskId
+
+			// Only prompt if a companion is connected
+			if (sseConnections.size === 0) {
+				logger.warn(`Task "${taskName}" blocked: ${blockReason} (no prompt companion connected)`)
+				return
+			}
+
+			logger.info(`Task "${taskName}" blocked: ${blockReason} — prompting user`)
+
+			prompt
+				.input({
+					message: `Task "${taskName}" is blocked: ${blockReason}\nProvide guidance to unblock:`,
+				})
+				.then((response) => {
+					if (response && task.blocked) {
+						task.unblock()
+						logger.info(`Task "${taskName}" unblocked with guidance: ${response}`)
+					}
+				})
+				.catch((error) => {
+					logger.warn(`Failed to prompt for blocked task "${taskName}": ${error}`)
+				})
+		},
+	})
+
+	// === Prompt with HTTP Server Bridge
+
+	// Create the HTTP server for prompt SSE bridging
+	const httpPort = Number(process.env.ORKESTREL_PORT ?? '3001')
+	const httpServer = createServer({ port: httpPort, timeout: 5000 })
+
+	// Track active SSE connections for shutdown broadcast
+	const sseConnections = new Set<ServerResponse>()
+
+	/** Broadcast a shutdown event to all connected SSE clients */
+	function broadcastShutdown(): void {
+		for (const res of sseConnections) {
+			try {
+				res.write('event: shutdown\ndata: {}\n\n')
+			} catch {
+				// Connection may already be closed
+			}
+		}
+		sseConnections.clear()
+	}
+
+	// Register default routes (health endpoint)
+	httpServer.routes.register([...defaultRoutes()])
+
+	// Register middleware
+	httpServer.middlewares.register([
+		securityHeadersMiddleware(),
+		corsMiddleware('*', [HEADER_TOKEN]),
+		tokenMiddleware(),
+	])
+
+	// SSE endpoint: GET /api/prompts — stream pending prompts
+	httpServer.routes.register({
+		method: 'GET',
+		path: '/api/prompts',
+		handler({ request: req, response: res }: RouteHandlerContext) {
+			res.writeHead(200, {
+				'Content-Type': 'text/event-stream',
+				'Cache-Control': 'no-cache',
+				Connection: 'keep-alive',
+			})
+
+			sseConnections.add(res)
+			let closed = false
+
+			const writeEvent = (event: string, data: unknown): void => {
+				if (closed) return
+				res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+			}
+
+			// Send all currently pending prompts immediately
+			for (const pending of prompt.pending()) {
+				writeEvent('prompt', pending)
+			}
+
+			// Subscribe this connection to future events
+			const unsubPending = prompt.onPending((pending) => writeEvent('prompt', pending))
+			const unsubAnswered = prompt.onAnswered((id) => writeEvent('answered', { id }))
+			const unsubExpired = prompt.onExpired((id) => writeEvent('expired', { id }))
+
+			req.on('close', () => {
+				closed = true
+				sseConnections.delete(res)
+				unsubPending()
+				unsubAnswered()
+				unsubExpired()
+			})
+		},
+	})
+
+	// POST endpoint: POST /api/prompts — submit a prompt response
+	httpServer.routes.register({
+		method: 'POST',
+		path: '/api/prompts',
+		async handler({ request: req, response: res }: RouteHandlerContext) {
+			const bodyResult = await parseJsonBody(req, 1024 * 64)
+			if (!bodyResult.success) {
+				sendErrorResponse(res, 400, bodyResult.error.message)
+				return
+			}
+
+			const body = bodyResult.value
+			if (!isRecord(body) || typeof body.id !== 'string' || !('value' in body)) {
+				sendErrorResponse(res, 422, 'Missing required fields: id, value')
+				return
+			}
+
+			const answered = prompt.answer(body.id, body.value)
+			if (answered) {
+				sendJson(res, { success: true, id: body.id })
+			} else {
+				sendErrorResponse(res, 404, `Prompt not found or already answered: ${body.id}`)
+			}
+		},
+	})
+
+	// Wire up the Prompt tool using the remote prompt
+	const promptTemplates = createTemplateManager()
+
+	const promptTemplateStores = createMCPStoreManager()
+	promptTemplateStores.create({ path: promptTemplatePath })
+
+	// Start the HTTP server first — port and token are needed for companion config
+	const allocatedPort = await httpServer.start()
+	const serverToken = httpServer.token ?? ''
+	logger.success(`Prompt server listening on http://localhost:${allocatedPort}`)
+
+	// === Prompt Companion Launch
+
+	// In SEA mode the sealed binary IS both server and companion — spawn itself.
+	// In dev mode, spawn `node mcp.js --companion`.
+	const companionScript = sealed
+		? process.execPath
+		: nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), 'mcp.js')
+
+	/** Spawn the prompt companion in a new terminal window */
+	function launchCompanion(): boolean {
+		const companionFlags = ['--companion', '--port', String(allocatedPort), '--token', serverToken]
+
+		if (verbose) {
+			companionFlags.push('--verbose')
+		}
+
+		// In SEA mode: run the executable directly. In dev mode: run via node.
+		const executable = sealed ? companionScript : 'node'
+		const executableArgs = sealed ? companionFlags : [companionScript, ...companionFlags]
+
+		try {
+			if (process.platform === 'win32') {
+				spawn('cmd', ['/c', 'start', 'Orkestrel Prompt', executable, ...executableArgs], {
+					detached: true,
+					stdio: 'ignore',
+					cwd: projectRoot,
+				}).unref()
+			} else {
+				const terminal = process.platform === 'darwin' ? 'open' : 'x-terminal-emulator'
+				const terminalArgs =
+					process.platform === 'darwin'
+						? ['-a', 'Terminal', '--', executable, ...executableArgs]
+						: ['-e', executable, ...executableArgs.map((a) => `"${a}"`)]
+				spawn(terminal, terminalArgs, {
+					detached: true,
+					stdio: 'ignore',
+					cwd: projectRoot,
+				}).unref()
+			}
+			logger.success('Prompt companion launched in a new terminal')
+			return true
+		} catch {
+			logger.warn('Could not launch prompt companion')
+			return false
+		}
+	}
+
+	const promptTool = new PromptTool({
+		name: 'prompt',
+		summary: 'Interactive terminal prompts and reusable prompt templates.',
+		description: [
+			'Interactive terminal prompts for gathering user input and managing',
+			'reusable prompt templates with placeholder substitution.',
+			'',
+			'Prompt operations:',
+			'- **input**: Prompt for a single line of text.',
+			'- **password**: Prompt for a password with masked characters.',
+			'- **confirm**: Prompt for a yes/no confirmation.',
+			'- **select**: Prompt for a single selection from a list.',
+			'- **checkbox**: Prompt for multiple selections from a list.',
+			'- **editor**: Prompt for multiline text input.',
+			'',
+			'Form operations:',
+			'- **form**: Run a sequential multi-field form. Each field specifies a prompt type and its options. Results are collected into a keyed record.',
+			'',
+			'Template operations:',
+			'- **register**: Register a reusable template with {{placeholder}} markers.',
+			'- **fill**: Fill a template with values, substituting all placeholders.',
+			"- **validate**: Validate fill values against a template's placeholders.",
+			'- **templates**: List all registered templates.',
+			'- **remove**: Remove a template by id.',
+			'',
+			'Remote companion operations:',
+			'- **status**: Check if the prompt companion is connected. Returns connection info and the command to launch manually.',
+			'- **launch**: Launch the prompt companion in a new terminal window. Will not launch if already connected.',
+			'',
+			'IMPORTANT — Before using any prompt operation (input, password, confirm, select, checkbox, editor),',
+			'call **status** first to check if the companion is connected. If not connected, launch it using',
+			"the IDE's built-in terminal by running the command from the status response (e.g. `run_in_terminal`).",
+			'This keeps the companion inside the IDE where the user can see and interact with it directly.',
+			'Only fall back to the **launch** operation if the IDE terminal is unavailable — it opens an',
+			'external terminal window which may be less convenient.',
+		].join('\n'),
+		terminal: prompt,
+		templates: promptTemplates,
+		stores: promptTemplateStores,
+		remote: {
+			port: allocatedPort,
+			token: serverToken,
+			script: companionScript,
+			sealed,
+			connected: () => sseConnections.size > 0,
+			launch: launchCompanion,
+		},
+	})
+
+	// === MCP Server — Dual Transport (stdio + SSE)
+	//
+	// Two MCPServer instances share the same set of tools:
+	// 1. Primary server on stdio — the IDE connects here (launched via mcp.json stdio entry)
+	// 2. Secondary server on Streamable HTTP — exposed at /mcp on the HTTP server
+	//    so additional clients can connect via the mcp.json SSE entry
+	//
+	// The stdio entry launches the process, which also starts the HTTP server.
+	// Both transports serve the same tools with identical capabilities.
+
+	const httpTransport = createHTTPServerTransport({
+		sessionId: () => crypto.randomUUID(),
+		hosts: ['localhost', '127.0.0.1', '[::1]'],
+	})
+
+	// Helper: read the raw request body as a string
+	function readBody(req: IncomingMessage): Promise<string> {
+		return new Promise((resolve, reject) => {
+			let body = ''
+			req.on('data', (chunk: Buffer) => {
+				body += chunk.toString('utf-8')
+			})
+			req.on('end', () => resolve(body))
+			req.on('error', reject)
+		})
+	}
+
+	// POST /mcp — main JSON-RPC endpoint
+	httpServer.routes.register({
+		method: 'POST',
+		path: '/mcp',
+		async handler({ request: req, response: res }: RouteHandlerContext) {
+			const body = await readBody(req)
+			const webReq = toWebRequest(req, body)
+			const webRes = await httpTransport.handle(webReq)
+			await writeWebResponse(res, webRes)
+		},
+	})
+
+	// GET /mcp — SSE stream for server-initiated messages
+	httpServer.routes.register({
+		method: 'GET',
+		path: '/mcp',
+		async handler({ request: req, response: res }: RouteHandlerContext) {
+			const webReq = toWebRequest(req)
+			const webRes = await httpTransport.handle(webReq)
+			await writeWebResponse(res, webRes)
+		},
+	})
+
+	// DELETE /mcp — session termination
+	httpServer.routes.register({
+		method: 'DELETE',
+		path: '/mcp',
+		async handler({ request: req, response: res }: RouteHandlerContext) {
+			const webReq = toWebRequest(req)
+			const webRes = await httpTransport.handle(webReq)
+			await writeWebResponse(res, webRes)
+		},
+	})
+
+	const mcpTools = [
+		reasonTool,
+		filesystemTool,
+		interpretTool,
+		agentTool,
+		sandboxTool,
+		promptTool,
+		workflowTool,
+	]
+
+	const mcpDescription = [
+		'Orkestrel provides a deterministic reasoning coprocessor, an in-memory filesystem, a natural language interpreter, an autonomous agent, an on-disk sandbox, interactive terminal prompts, and declarative workflow tracking.',
+		'Use the `reason` tool whenever you need guaranteed-correct math, logic, symbolic algebra, or inference.',
+		'Use the `filesystem` tool to safely load, edit, and persist files.',
+		'Use the `interpret` tool to convert natural language into structured computation inputs.',
+		'Use the `agent` tool to delegate tasks to a specialized sub-agent with autonomous execution. You can scope its tools, provide instructions, and attach documents.',
+		'Use the `sandbox` tool to create isolated temporary directories for on-disk file operations with path-guarded safety.',
+		'Use the `prompt` tool to interactively gather user input and manage reusable prompt templates. Before using prompt operations, check the status to see if the companion is connected. If not, launch it in the IDE terminal using the command from the status response (preferred) or fall back to the launch operation.',
+		'Use the `workflow` tool to create, track, and manage workflows with phases and tasks. Workflows are declarative blueprints for organizing work.',
+		'NEVER hallucinate computations — delegate to the reason tool instead.',
+	].join('\n')
+
+	// Primary MCP server — stdio transport for IDE communication
+	const stdioServer = createMCPServer({
+		name: 'orkestrel',
+		version: '0.0.1',
+		tools: mcpTools,
+		description: mcpDescription,
+	})
+
+	// Secondary MCP server — Streamable HTTP transport for SSE clients
+	const sseServer = createMCPServer({
+		name: 'orkestrel',
+		version: '0.0.1',
+		transport: httpTransport,
+		tools: mcpTools,
+		description: mcpDescription,
+	})
+
+	// WebSocket upgrade handler — accepts ws:// connections on /mcp
+	const wsUpgrade = createWebSocketUpgradeHandler(
+		(socket) => {
+			const transport = new WebSocketServerTransport(socket)
+			const wsServer = createMCPServer({
+				name: 'orkestrel',
+				version: '0.0.1',
+				transport,
+				tools: mcpTools,
+				description: mcpDescription,
+			})
+			wsServer.start()
+			transport.onClose = () => wsServer.stop()
+		},
+		{ path: '/mcp' },
+	)
+
+	httpServer.http?.on('upgrade', wsUpgrade)
+
+	// Initialize tools
+	logger.debug('Initializing tools...')
+	await reasonTool.init()
+	await filesystemTool.init()
+	await interpretTool.init()
+	await promptTool.init()
+	await workflowTool.init()
+	logger.debug('Tools initialized')
+
+	// Render startup banner to stderr (keeps stdout clean for JSON-RPC)
+	renderBanner(output, {
+		port: allocatedPort,
+		tools: mcpTools,
+	})
+
+	// === Graceful Shutdown
+
+	let shuttingDown = false
+
+	function shutdown(): void {
+		if (shuttingDown) return
+		shuttingDown = true
+
+		logger.info('Shutting down...')
+
+		// Broadcast shutdown to all SSE clients so prompt companions exit cleanly
+		broadcastShutdown()
+		logger.debug(`Broadcast shutdown to ${sseConnections.size} SSE client(s)`)
+
+		// Expire all pending prompts
+		prompt.destroy()
+
+		// Stop the HTTP server (graceful drain)
+		httpServer.stop()
+
+		// Stop both MCP servers
+		stdioServer.stop()
+		sseServer.stop()
+
+		logger.success('Shutdown complete')
+
+		// Allow a brief drain period before exiting
+		setTimeout(() => process.exit(0), 500)
+	}
+
+	// MCP client disconnected (IDE closed the stdio pipe)
+	process.stdin.on('end', shutdown)
+	process.stdin.on('close', shutdown)
+
+	// Manual termination
+	process.on('SIGINT', shutdown)
+	process.on('SIGTERM', shutdown)
+
+	// Start both MCP servers
+	logger.ready(
+		`MCP on stdio + SSE at http://localhost:${allocatedPort}/mcp — prompt companion on /api/prompts`,
+	)
+	stdioServer.start()
+	sseServer.start()
+})()
