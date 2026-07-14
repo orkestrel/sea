@@ -133,6 +133,10 @@ export interface PeFixtureOptions {
 	readonly plus?: boolean
 	/** Include a pre-existing `.rsrc` section with one named leaf. Default: false. */
 	readonly resources?: boolean
+	/** Append a trailing Authenticode certificate blob of this size and point
+	 * the security data directory at it (file offset + size), for exercising
+	 * {@link stripPESignature}'s certificate-overlay truncation. Default: none. */
+	readonly cert?: number
 }
 
 function alignUp(value: number, alignment: number): number {
@@ -301,6 +305,19 @@ export function buildPeFixture(options?: PeFixtureOptions): Buffer {
 		resourceBuf.copy(buf, rsrcRawOffset)
 	}
 
+	const certSize = options?.cert
+	if (certSize !== undefined && certSize > 0) {
+		const withCert = Buffer.alloc(fileSize + certSize)
+		buf.copy(withCert, 0)
+		// Security data directory entry (index 4): VirtualAddress is a FILE
+		// OFFSET (not an RVA, per the PE spec's special case for this entry).
+		const securityDirOffset = optionalOffset + dataDirRelOffset + 4 * 8
+		withCert.writeUInt32LE(fileSize, securityDirOffset)
+		withCert.writeUInt32LE(certSize, securityDirOffset + 4)
+		withCert.fill(0xcc, fileSize, fileSize + certSize)
+		return withCert
+	}
+
 	return buf
 }
 
@@ -336,7 +353,7 @@ function parsePeSections(buf: Buffer): readonly PeSectionInfo[] {
 		const name = buf
 			.subarray(off, off + 8)
 			.toString('ascii')
-			.replace(/\0+$/, '')
+			.replace(/[^\x20-\x7e]+$/, '')
 		sections.push({
 			name,
 			virtualSize: buf.readUInt32LE(off + 8),
@@ -583,7 +600,7 @@ export function findElfNotes(buf: Buffer, namePrefix: string): readonly ElfNote[
 		const descsz = buf.readUInt32LE(header.offset + 4)
 		if (namesz === 0 || namesz > 256) continue
 		const nameBuf = buf.subarray(header.offset + 12, header.offset + 12 + namesz)
-		const name = nameBuf.toString('utf-8').replace(/\0+$/, '')
+		const name = nameBuf.toString('utf-8').replace(/[^\x20-\x7e]+$/, '')
 		if (!name.startsWith(namePrefix)) continue
 		const descOffset = header.offset + 12 + alignTo4(namesz)
 		notes.push({ header, name, descsz, descriptor: buf.subarray(descOffset, descOffset + descsz) })

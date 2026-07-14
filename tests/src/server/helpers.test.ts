@@ -1,26 +1,60 @@
-import { existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs'
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	readSync,
+	symlinkSync,
+	writeFileSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+	buildELFNoteHeader,
 	compressDirectory,
+	compressFile,
+	computeSize,
 	createBlobConfig,
 	createSignCommand,
 	ensureContained,
 	ensureSafeKey,
 	ensureSafeName,
 	finalizeExecutable,
+	formatSize,
+	isPEExecutable,
 	isSEAError,
 	isShellError,
 	openBrowser,
+	parsePEOffset,
+	patchPESubsystem,
+	patchSentinelFuse,
+	readU16,
 	runShell,
+	stripPESignature,
 	syncDirectory,
 	walkDirectory,
+	writeU16,
 } from '@src/server'
-import { withTestDir } from '../../setupServer.js'
+import { buildPeFixture, withTestDir } from '../../setupServer.js'
 import { captureError } from '../../setup.js'
 
 describe('helpers', () => {
 	describe('runShell', () => {
+		it('returns stdout on success', () => {
+			const stdout = runShell([process.execPath, '-e', "process.stdout.write('ok')"])
+
+			expect(stdout.toString('utf-8')).toBe('ok')
+		})
+
+		it('throws SEAError code STATE for an empty command array', () => {
+			const error = captureError(() => {
+				return runShell([])
+			})
+
+			expect(isSEAError(error) && error.code === 'STATE').toBe(true)
+		})
+
 		it('enforces a timeout', () => {
 			const error = captureError(() => {
 				return runShell([process.execPath, '-e', 'setInterval(()=>{},1000)'], { timeout: 50 })
@@ -534,6 +568,348 @@ describe('helpers', () => {
 				'AABBCCDDEEFF00112233445566778899AABBCCDD',
 				'dist/app.exe',
 			])
+		})
+	})
+
+	describe('parsePEOffset / readU16 / writeU16 / isPEExecutable', () => {
+		it('parses the PE header offset from a valid PE fixture', async () => {
+			await withTestDir({}, (dir) => {
+				const path = join(dir.root, 'app.exe')
+				const buf = buildPeFixture()
+				writeFileSync(path, buf)
+
+				const fd = openSync(path, 'r')
+				try {
+					expect(parsePEOffset(fd)).toBe(buf.readUInt32LE(0x3c))
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+
+		it('returns 0 for a file too short to contain the e_lfanew field', async () => {
+			await withTestDir({}, (dir) => {
+				const path = join(dir.root, 'short.bin')
+				writeFileSync(path, Buffer.alloc(8))
+
+				const fd = openSync(path, 'r')
+				try {
+					expect(parsePEOffset(fd)).toBe(0)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+
+		it('round-trips readU16/writeU16 including boundary values', async () => {
+			await withTestDir({}, (dir) => {
+				const path = join(dir.root, 'scratch.bin')
+				writeFileSync(path, Buffer.alloc(16))
+
+				const fd = openSync(path, 'r+')
+				try {
+					for (const value of [0, 1, 0x1234, 0xfffe, 0xffff]) {
+						writeU16(fd, 4, value)
+						expect(readU16(fd, 4)).toBe(value)
+					}
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+
+		it('is little-endian', async () => {
+			await withTestDir({}, (dir) => {
+				const path = join(dir.root, 'endian.bin')
+				writeFileSync(path, Buffer.alloc(4))
+
+				const fd = openSync(path, 'r+')
+				try {
+					writeU16(fd, 0, 0x0102)
+					const raw = Buffer.alloc(2)
+					readSync(fd, raw, 0, 2, 0)
+					expect(raw[0]).toBe(0x02)
+					expect(raw[1]).toBe(0x01)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+
+		it('recognizes a valid PE fixture as a PE executable', async () => {
+			await withTestDir({}, (dir) => {
+				const path = join(dir.root, 'app.exe')
+				writeFileSync(path, buildPeFixture())
+
+				expect(isPEExecutable(path)).toBe(true)
+			})
+		})
+
+		it('rejects non-PE bytes', async () => {
+			await withTestDir({}, (dir) => {
+				const path = join(dir.root, 'not-pe.bin')
+				writeFileSync(path, Buffer.from('this is not a PE file at all'))
+
+				expect(isPEExecutable(path)).toBe(false)
+			})
+		})
+
+		it('rejects a nonexistent path', () => {
+			expect(isPEExecutable('/does/not/exist.exe')).toBe(false)
+		})
+	})
+
+	describe('patchPESubsystem', () => {
+		it.each([false, true])(
+			'patches the subsystem u16 without touching neighbors (plus=%s)',
+			(plus) => {
+				return withTestDir({}, (dir) => {
+					const path = join(dir.root, 'app.exe')
+					const original = buildPeFixture({ plus })
+					writeFileSync(path, original)
+
+					const peOffset = original.readUInt32LE(0x3c)
+					const subsystemOffset = peOffset + 0x5c
+
+					patchPESubsystem(path, 2)
+
+					const patched = readFileSync(path)
+					expect(patched.readUInt16LE(subsystemOffset)).toBe(2)
+					// Neighboring bytes (DllCharacteristics before, and 2 bytes after)
+					// must be untouched.
+					expect(patched.readUInt16LE(subsystemOffset - 2)).toBe(
+						original.readUInt16LE(subsystemOffset - 2),
+					)
+					expect(patched.readUInt16LE(subsystemOffset + 2)).toBe(
+						original.readUInt16LE(subsystemOffset + 2),
+					)
+				})
+			},
+		)
+	})
+
+	describe('stripPESignature', () => {
+		it.each([false, true])('zeroes the 8-byte security directory entry (plus=%s)', (plus) => {
+			return withTestDir({}, (dir) => {
+				const path = join(dir.root, 'app.exe')
+				const buf = buildPeFixture({ plus })
+				const peOffset = buf.readUInt32LE(0x3c)
+				const securityDirOffset = plus ? peOffset + 168 : peOffset + 152
+
+				// Plant a nonzero directory entry so zeroing is observable, without
+				// making it point at a real trailing certificate (offset+size !=
+				// EOF here), so no truncation should occur.
+				buf.writeUInt32LE(0x1234, securityDirOffset)
+				buf.writeUInt32LE(0x10, securityDirOffset + 4)
+				const before = Buffer.from(buf)
+				writeFileSync(path, buf)
+
+				stripPESignature(path)
+
+				const after = readFileSync(path)
+				expect(after.readUInt32LE(securityDirOffset)).toBe(0)
+				expect(after.readUInt32LE(securityDirOffset + 4)).toBe(0)
+				// Neighbors untouched.
+				expect(after.readUInt32LE(securityDirOffset - 4)).toBe(
+					before.readUInt32LE(securityDirOffset - 4),
+				)
+				expect(after.readUInt32LE(securityDirOffset + 8)).toBe(
+					before.readUInt32LE(securityDirOffset + 8),
+				)
+				expect(after.length).toBe(before.length)
+			})
+		})
+
+		it('truncates a trailing certificate overlay described by the security directory', () => {
+			return withTestDir({}, (dir) => {
+				const path = join(dir.root, 'signed.exe')
+				const certSize = 64
+				const withCert = buildPeFixture({ cert: certSize })
+				const expectedTruncatedSize = withCert.length - certSize
+				writeFileSync(path, withCert)
+
+				stripPESignature(path)
+
+				const after = readFileSync(path)
+				expect(after.length).toBe(expectedTruncatedSize)
+
+				const peOffset = after.readUInt32LE(0x3c)
+				const securityDirOffset = peOffset + 152
+				expect(after.readUInt32LE(securityDirOffset)).toBe(0)
+				expect(after.readUInt32LE(securityDirOffset + 4)).toBe(0)
+			})
+		})
+	})
+
+	describe('patchSentinelFuse', () => {
+		function buildFuseFixture(fuse: string, value: string): Buffer {
+			return Buffer.concat([
+				Buffer.from('padding-before-fuse-'),
+				Buffer.from(fuse, 'utf-8'),
+				Buffer.from(value, 'utf-8'),
+				Buffer.from('-padding-after'),
+			])
+		}
+
+		it('flips an unset fuse from :0 to :1', () => {
+			return withTestDir({}, (dir) => {
+				const path = join(dir.root, 'app.exe')
+				writeFileSync(path, buildFuseFixture('MY_FUSE', ':0'))
+
+				patchSentinelFuse(path, 'MY_FUSE')
+
+				const after = readFileSync(path, 'utf-8')
+				expect(after.includes('MY_FUSE:1')).toBe(true)
+			})
+		})
+
+		it('is a no-op when the fuse is already flipped to :1', () => {
+			return withTestDir({}, (dir) => {
+				const path = join(dir.root, 'app.exe')
+				const buf = buildFuseFixture('MY_FUSE', ':1')
+				writeFileSync(path, buf)
+
+				patchSentinelFuse(path, 'MY_FUSE')
+
+				const after = readFileSync(path)
+				expect(Buffer.compare(after, buf)).toBe(0)
+			})
+		})
+
+		it('throws SEAError code FUSE for an unexpected sentinel value', () => {
+			return withTestDir({}, (dir) => {
+				const path = join(dir.root, 'app.exe')
+				writeFileSync(path, buildFuseFixture('MY_FUSE', ':X'))
+
+				const error = captureError(() => {
+					patchSentinelFuse(path, 'MY_FUSE')
+				})
+
+				expect(isSEAError(error) && error.code === 'FUSE').toBe(true)
+			})
+		})
+
+		it('throws SEAError code FUSE when the sentinel is not found', () => {
+			return withTestDir({}, (dir) => {
+				const path = join(dir.root, 'app.exe')
+				writeFileSync(path, Buffer.from('no fuse token here at all'))
+
+				const error = captureError(() => {
+					patchSentinelFuse(path, 'MY_FUSE')
+				})
+
+				expect(isSEAError(error) && error.code === 'FUSE').toBe(true)
+			})
+		})
+	})
+
+	describe('computeSize', () => {
+		it('returns ratio 0 when original is 0', () => {
+			expect(computeSize(0, 0)).toEqual({ original: 0, compressed: 0, ratio: 0 })
+		})
+
+		it('computes the compression ratio', () => {
+			expect(computeSize(100, 50)).toEqual({ original: 100, compressed: 50, ratio: 0.5 })
+		})
+
+		it('allows a ratio above 1 (compressed larger than original)', () => {
+			const result = computeSize(10, 20)
+			expect(result.ratio).toBe(2)
+		})
+	})
+
+	describe('formatSize', () => {
+		it('formats 0 bytes', () => {
+			expect(formatSize(0)).toBe('0 B')
+		})
+
+		it('formats bytes below the KB threshold', () => {
+			expect(formatSize(1023)).toBe('1023 B')
+		})
+
+		it('formats at the KB threshold', () => {
+			expect(formatSize(1024)).toBe('1.0 KB')
+		})
+
+		it('formats at the MB threshold', () => {
+			expect(formatSize(1024 * 1024)).toBe('1.00 MB')
+		})
+
+		it('formats a very large value using the MB branch (no GB threshold)', () => {
+			expect(formatSize(5 * 1024 * 1024 * 1024)).toBe('5120.00 MB')
+		})
+	})
+
+	describe('compressFile', () => {
+		it('compresses a real file to the requested output', async () => {
+			await withTestDir(
+				{
+					'input.html': '<p>hello hello hello</p>',
+				},
+				(dir) => {
+					const input = join(dir.root, 'input.html')
+					const output = join(dir.root, 'input.html.br')
+
+					const result = compressFile(input, output)
+
+					expect(existsSync(output)).toBe(true)
+					expect(result.input).toBe(input)
+					expect(result.output).toBe(output)
+					expect(result.size.original).toBeGreaterThan(0)
+					expect(result.size.compressed).toBeGreaterThan(0)
+				},
+			)
+		})
+
+		it('refuses to write compressed output through a planted symlink', async (context) => {
+			await withTestDir(
+				{
+					'input.html': '<p>hello</p>',
+					'victim.txt': 'do not touch me',
+				},
+				(dir) => {
+					const input = join(dir.root, 'input.html')
+					const victim = join(dir.root, 'victim.txt')
+					const output = join(dir.root, 'input.html.br')
+
+					try {
+						symlinkSync(victim, output)
+					} catch {
+						context.skip()
+						return
+					}
+
+					const error = captureError(() => {
+						compressFile(input, output)
+					})
+
+					expect(isSEAError(error) && error.code === 'OUTPUT').toBe(true)
+					expect(readFileSync(victim, 'utf-8')).toBe('do not touch me')
+				},
+			)
+		})
+	})
+
+	describe('buildELFNoteHeader', () => {
+		it('encodes namesz/descsz/type and the 4-padded name', () => {
+			const { header, entryTotal } = buildELFNoteHeader('NODE_SEA_BLOB', 4096)
+
+			expect(header.readUInt32LE(0)).toBe('NODE_SEA_BLOB'.length + 1) // namesz includes NUL
+			expect(header.readUInt32LE(4)).toBe(4096) // descsz
+			expect(header.readUInt32LE(8)).toBe(0) // type
+			expect(header.toString('utf-8', 12, 12 + 'NODE_SEA_BLOB'.length + 1)).toBe('NODE_SEA_BLOB\0')
+			// name region is 4-byte-padded: namesz=14 aligns up to 16
+			expect(header.length).toBe(12 + 16)
+			expect(entryTotal).toBe(header.length + 4096)
+		})
+
+		it('4-byte-pads the blob size in entryTotal when it is not aligned', () => {
+			const { header, entryTotal } = buildELFNoteHeader('X', 10)
+
+			// namesz = 2 ('X\0'), aligned to 4
+			expect(header.length).toBe(12 + 4)
+			// blobSize 10 aligns up to 12
+			expect(entryTotal).toBe(header.length + 12)
 		})
 	})
 })
