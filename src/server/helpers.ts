@@ -822,6 +822,66 @@ export function buildELFNoteHeader(
 	return { header, entryTotal: header.length + alignedDescSize }
 }
 
+/**
+ * Copy a byte range from one open file descriptor to another, streaming in
+ * fixed-size chunks instead of buffering the whole range in memory.
+ *
+ * @remarks
+ * Reads `length` bytes from `source` starting at file offset `start`, in
+ * `chunk`-sized reads, and writes each chunk to `target` with a `null`
+ * write position so writes land sequentially at `target`'s current file
+ * position (rather than at `start`, which is meaningless for `target`). A
+ * short read from `source` (fewer bytes returned than requested, including
+ * `0` before `length` is exhausted) is treated as a genuine failure and
+ * throws rather than silently writing a truncated range.
+ *
+ * @param source - Open, readable file descriptor to copy from
+ * @param target - Open, writable file descriptor to copy to
+ * @param start - Byte offset in `source` to begin reading from
+ * @param length - Number of bytes to copy; `0` is a no-op
+ * @param chunk - Read/write chunk size in bytes, for tuning memory use and
+ * exercising the streaming loop in tests. Default: 4 MB.
+ * @throws SEAError with code `'OUTPUT'` when `source` is exhausted before
+ * `length` bytes have been copied
+ *
+ * @example
+ * ```ts
+ * const srcFd = openSync('big.bin', 'r')
+ * const dstFd = openSync('out.bin', 'w')
+ * copyRange(srcFd, dstFd, 1024, 4096)
+ * ```
+ */
+export function copyRange(
+	source: number,
+	target: number,
+	start: number,
+	length: number,
+	chunk = 4 * 1024 * 1024,
+): void {
+	if (length <= 0) return
+
+	const bufferSize = Math.min(chunk, length)
+	const buffer = Buffer.alloc(bufferSize)
+	let position = start
+	let remaining = length
+
+	while (remaining > 0) {
+		const toRead = Math.min(chunk, remaining)
+		const bytesRead = readSync(source, buffer, 0, toRead, position)
+		if (bytesRead === 0) {
+			throw new SEAError('OUTPUT', 'Unexpected end of file while copying byte range', {
+				start,
+				length,
+				position,
+				remaining,
+			})
+		}
+		writeSync(target, buffer, 0, bytesRead, null)
+		position += bytesRead
+		remaining -= bytesRead
+	}
+}
+
 // === SEA Helpers
 
 /**

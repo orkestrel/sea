@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Injector, isSEAError, SEA_SENTINEL_FUSE } from '@src/server'
@@ -200,11 +200,19 @@ describe('Injector', () => {
 				const blobContent = 'sea blob payload for macho segment injection'
 
 				writeFileSync(executable, buildMachoFixture())
+				chmodSync(executable, 0o755)
 				writeFileSync(blob, blobContent)
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
 				expect(() => injector.inject()).not.toThrow()
+
+				// The streamed rewrite (temp file + atomic rename) must preserve the
+				// executable's mode bits, including the executable bit, and must not
+				// leave its `.inject-*.tmp` staging file behind.
+				expect(statSync(executable).mode & 0o777).toBe(0o755)
+				const leftoverTemp = readdirSync(dir.root).filter((name) => name.startsWith('.inject-'))
+				expect(leftoverTemp).toEqual([])
 
 				const result = readFileSync(executable)
 				const segments = parseMachoSegments(result)

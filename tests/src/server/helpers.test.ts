@@ -15,6 +15,7 @@ import {
 	compressDirectory,
 	compressFile,
 	computeSize,
+	copyRange,
 	createBlobConfig,
 	createSignCommand,
 	ensureContained,
@@ -222,6 +223,94 @@ describe('helpers', () => {
 					expect(existsSync(source)).toBe(false)
 				},
 			)
+		})
+	})
+
+	describe('copyRange', () => {
+		it('copies a range from a nonzero start', async () => {
+			await withTestDir({}, (dir) => {
+				const sourcePath = join(dir.root, 'source.bin')
+				const targetPath = join(dir.root, 'target.bin')
+				const source = Buffer.from('0123456789abcdefghij', 'utf-8')
+				writeFileSync(sourcePath, source)
+				writeFileSync(targetPath, Buffer.alloc(0))
+
+				const srcFd = openSync(sourcePath, 'r')
+				const dstFd = openSync(targetPath, 'w')
+				try {
+					copyRange(srcFd, dstFd, 5, 6)
+				} finally {
+					closeSync(srcFd)
+					closeSync(dstFd)
+				}
+
+				expect(readFileSync(targetPath).toString('utf-8')).toBe('56789a')
+			})
+		})
+
+		it('copies a partial length shorter than the source', async () => {
+			await withTestDir({}, (dir) => {
+				const sourcePath = join(dir.root, 'source.bin')
+				const targetPath = join(dir.root, 'target.bin')
+				writeFileSync(sourcePath, Buffer.from('the quick brown fox', 'utf-8'))
+				writeFileSync(targetPath, Buffer.alloc(0))
+
+				const srcFd = openSync(sourcePath, 'r')
+				const dstFd = openSync(targetPath, 'w')
+				try {
+					copyRange(srcFd, dstFd, 0, 3)
+				} finally {
+					closeSync(srcFd)
+					closeSync(dstFd)
+				}
+
+				expect(readFileSync(targetPath).toString('utf-8')).toBe('the')
+			})
+		})
+
+		it('is a no-op when length is 0', async () => {
+			await withTestDir({}, (dir) => {
+				const sourcePath = join(dir.root, 'source.bin')
+				const targetPath = join(dir.root, 'target.bin')
+				writeFileSync(sourcePath, Buffer.from('anything', 'utf-8'))
+				writeFileSync(targetPath, Buffer.alloc(0))
+
+				const srcFd = openSync(sourcePath, 'r')
+				const dstFd = openSync(targetPath, 'w')
+				try {
+					copyRange(srcFd, dstFd, 2, 0)
+				} finally {
+					closeSync(srcFd)
+					closeSync(dstFd)
+				}
+
+				expect(readFileSync(targetPath).length).toBe(0)
+			})
+		})
+
+		it('spans multiple chunks when the range exceeds chunk size', async () => {
+			await withTestDir({}, (dir) => {
+				const sourcePath = join(dir.root, 'source.bin')
+				const targetPath = join(dir.root, 'target.bin')
+				const source = Buffer.from('abcdefghijklmnopqrstuvwxyz', 'utf-8')
+				writeFileSync(sourcePath, source)
+				writeFileSync(targetPath, Buffer.alloc(0))
+
+				const srcFd = openSync(sourcePath, 'r')
+				const dstFd = openSync(targetPath, 'w')
+				try {
+					// chunk=4 forces the read/write loop to iterate multiple times
+					// over the 13-byte range starting at offset 3.
+					copyRange(srcFd, dstFd, 3, 13, 4)
+				} finally {
+					closeSync(srcFd)
+					closeSync(dstFd)
+				}
+
+				expect(readFileSync(targetPath).toString('utf-8')).toBe(
+					source.subarray(3, 16).toString('utf-8'),
+				)
+			})
 		})
 	})
 

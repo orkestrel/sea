@@ -16,10 +16,13 @@ import {
 	writeSync,
 	closeSync,
 	statSync,
+	fstatSync,
+	chmodSync,
+	rmSync,
 	appendFileSync,
-	readFileSync,
-	writeFileSync,
 } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import {
 	PE_MAGIC,
 	PE_SIGNATURE,
@@ -41,7 +44,7 @@ import {
 	MACHO_MAGIC_64,
 	MACHO_LC_SEGMENT_64,
 } from '../constants.js'
-import { patchSentinelFuse, buildELFNoteHeader } from '../helpers.js'
+import { patchSentinelFuse, buildELFNoteHeader, finalizeExecutable, copyRange } from '../helpers.js'
 import { SEAError } from '../errors.js'
 
 // === Injector
@@ -1340,230 +1343,285 @@ export class Injector implements InjectorInterface {
 
 	#injectMacho(): void {
 		const exePath = this.#options.executable
-		const buf = readFileSync(exePath)
+		const fileSize = statSync(exePath).size
+		const srcFd = openSync(exePath, 'r')
+		let destFd: number | undefined
+		let blobFd: number | undefined
+		let injTemp: string | undefined
 
-		// --- Parse Mach-O header ---
-		const magic = buf.readUInt32LE(0)
-		if (magic !== MACHO_MAGIC_64) {
-			throw new SEAError('FORMAT', `Unsupported Mach-O magic: 0x${magic.toString(16)}`, {
-				executable: exePath,
-				magic,
-			})
-		}
-
-		const cputype = buf.readUInt32LE(4)
-		const ncmds = buf.readUInt32LE(16)
-		const sizeofcmds = buf.readUInt32LE(20)
-		const headerSize = 32 // Mach-O 64-bit header
-
-		const segmentName = this.#options.macho?.segment ?? 'NODE_SEA'
-		let sectionName = this.#options.resource
-		if (!sectionName.startsWith('__')) {
-			sectionName = `__${sectionName}`
-		}
-
-		// --- Walk load commands once, collecting their bounds ---
-		const commands: Array<{ type: number; size: number; offset: number }> = []
-		let cmdOffset = headerSize
-		for (let i = 0; i < ncmds; i++) {
-			if (cmdOffset + 8 > buf.length) {
-				throw new SEAError('FORMAT', 'Malformed Mach-O load command table', {
+		try {
+			// --- Bounded header read: just enough to cover every header/LC parse
+			// and mutation below (headerSize + sizeofcmds) — never the whole file. ---
+			const headerSize = 32 // Mach-O 64-bit header
+			const preHeader = Buffer.alloc(headerSize)
+			readSync(srcFd, preHeader, 0, headerSize, 0)
+			const preSizeofcmds = preHeader.readUInt32LE(20)
+			if (headerSize + preSizeofcmds > fileSize) {
+				throw new SEAError('FORMAT', 'Mach-O load command region exceeds file size', {
 					executable: exePath,
+					headerSize,
+					sizeofcmds: preSizeofcmds,
+					fileSize,
 				})
 			}
-			const cmdType = buf.readUInt32LE(cmdOffset)
-			const cmdSize = buf.readUInt32LE(cmdOffset + 4)
-			if (cmdSize < 8 || cmdOffset + cmdSize > buf.length) {
-				throw new SEAError('FORMAT', 'Malformed Mach-O load command table', {
+			const buf = Buffer.alloc(headerSize + preSizeofcmds)
+			readSync(srcFd, buf, 0, headerSize + preSizeofcmds, 0)
+
+			// --- Parse Mach-O header ---
+			const magic = buf.readUInt32LE(0)
+			if (magic !== MACHO_MAGIC_64) {
+				throw new SEAError('FORMAT', `Unsupported Mach-O magic: 0x${magic.toString(16)}`, {
 					executable: exePath,
+					magic,
 				})
 			}
-			commands.push({ type: cmdType, size: cmdSize, offset: cmdOffset })
-			cmdOffset += cmdSize
-		}
 
-		let linkeditIndex = -1
-		const existingSegmentIndices: number[] = []
-		for (let i = 0; i < commands.length; i++) {
-			const cmd = commands[i]
-			if (cmd === undefined || cmd.type !== MACHO_LC_SEGMENT_64) continue
-			const segName = this.#stripTrailingNulls(
-				buf.subarray(cmd.offset + 8, cmd.offset + 24).toString('ascii'),
-			)
-			if (segName === '__LINKEDIT') linkeditIndex = i
-			if (segName === segmentName) existingSegmentIndices.push(i)
-		}
+			const cputype = buf.readUInt32LE(4)
+			const ncmds = buf.readUInt32LE(16)
+			const sizeofcmds = buf.readUInt32LE(20)
 
-		if (existingSegmentIndices.length > 0 && this.#options.overwrite === false) {
-			throw new SEAError('INJECT', `Segment "${segmentName}" already exists`, {
-				executable: exePath,
-				segmentName,
-			})
-		}
-		const linkeditCmd = linkeditIndex === -1 ? undefined : commands[linkeditIndex]
-		if (linkeditCmd === undefined) {
-			throw new SEAError('INJECT', 'Mach-O binary has no __LINKEDIT segment', {
-				executable: exePath,
-			})
-		}
+			const segmentName = this.#options.macho?.segment ?? 'NODE_SEA'
+			let sectionName = this.#options.resource
+			if (!sectionName.startsWith('__')) {
+				sectionName = `__${sectionName}`
+			}
 
-		const Loff = Number(buf.readBigUInt64LE(linkeditCmd.offset + 40))
-		const Lsize = Number(buf.readBigUInt64LE(linkeditCmd.offset + 48))
-		const Lvm = buf.readBigUInt64LE(linkeditCmd.offset + 24)
-
-		const blobSize = statSync(this.#options.blob).size
-		// arm64 (0x0100000c) requires 16K pages; every other architecture (x86_64
-		// etc.) uses 4K — 0x4000 is a safe superset alignment for either.
-		const pageSize = cputype === 0x0100000c ? 0x4000 : 0x1000
-		const shift = this.#align(blobSize, pageSize)
-
-		// --- Ceiling check BEFORE mutating anything: the enlarged load-command
-		// region (plus 16 bytes reserved for codesign re-adding
-		// LC_CODE_SIGNATURE) must not overrun the first real section's bytes. ---
-		let firstSectionOffset = buf.length
-		for (const cmd of commands) {
-			if (cmd.type !== MACHO_LC_SEGMENT_64) continue
-			const nsects = buf.readUInt32LE(cmd.offset + 64)
-			for (let s = 0; s < nsects; s++) {
-				const sectOff = cmd.offset + 72 + s * 80
-				if (sectOff + 80 > buf.length) continue
-				const size = Number(buf.readBigUInt64LE(sectOff + 40))
-				const offset = buf.readUInt32LE(sectOff + 48)
-				if (size > 0 && offset > 0 && offset < firstSectionOffset) {
-					firstSectionOffset = offset
+			// --- Walk load commands once, collecting their bounds ---
+			const commands: Array<{ type: number; size: number; offset: number }> = []
+			let cmdOffset = headerSize
+			for (let i = 0; i < ncmds; i++) {
+				if (cmdOffset + 8 > buf.length) {
+					throw new SEAError('FORMAT', 'Malformed Mach-O load command table', {
+						executable: exePath,
+					})
 				}
+				const cmdType = buf.readUInt32LE(cmdOffset)
+				const cmdSize = buf.readUInt32LE(cmdOffset + 4)
+				if (cmdSize < 8 || cmdOffset + cmdSize > buf.length) {
+					throw new SEAError('FORMAT', 'Malformed Mach-O load command table', {
+						executable: exePath,
+					})
+				}
+				commands.push({ type: cmdType, size: cmdSize, offset: cmdOffset })
+				cmdOffset += cmdSize
 			}
-		}
 
-		const newCmdSize = 72 + 80
-		const removedSize = commands
-			.filter((_c, i) => existingSegmentIndices.includes(i))
-			.reduce((sum, c) => sum + c.size, 0)
-		const newNcmds = commands.length - existingSegmentIndices.length + 1
-		const newSizeofcmds = sizeofcmds - removedSize + newCmdSize
-
-		if (headerSize + newSizeofcmds + 16 > firstSectionOffset) {
-			throw new SEAError(
-				'INJECT',
-				`Not enough header space for new Mach-O load command ` +
-					`(need offset ${String(headerSize + newSizeofcmds + 16)}, first section at ${String(firstSectionOffset)})`,
-				{
-					executable: exePath,
-					firstSectionOffset,
-					requiredOffset: headerSize + newSizeofcmds + 16,
-				},
-			)
-		}
-
-		// --- Mutate in place: shift __LINKEDIT and every linkedit-relative
-		// offset field in the surviving commands, using the ORIGINAL Loff as
-		// the "does this offset point into __LINKEDIT" threshold. ---
-		for (let i = 0; i < commands.length; i++) {
-			const cmd = commands[i]
-			if (cmd === undefined || existingSegmentIndices.includes(i)) continue
-
-			if (cmd.type === MACHO_LC_SEGMENT_64) {
+			let linkeditIndex = -1
+			const existingSegmentIndices: number[] = []
+			for (let i = 0; i < commands.length; i++) {
+				const cmd = commands[i]
+				if (cmd === undefined || cmd.type !== MACHO_LC_SEGMENT_64) continue
 				const segName = this.#stripTrailingNulls(
 					buf.subarray(cmd.offset + 8, cmd.offset + 24).toString('ascii'),
 				)
-				if (segName === '__LINKEDIT') {
-					const nsects = buf.readUInt32LE(cmd.offset + 64)
-					if (nsects > 0) {
-						throw new SEAError('INJECT', '__LINKEDIT segment with sections is not supported', {
-							executable: exePath,
-						})
+				if (segName === '__LINKEDIT') linkeditIndex = i
+				if (segName === segmentName) existingSegmentIndices.push(i)
+			}
+
+			if (existingSegmentIndices.length > 0 && this.#options.overwrite === false) {
+				throw new SEAError('INJECT', `Segment "${segmentName}" already exists`, {
+					executable: exePath,
+					segmentName,
+				})
+			}
+			const linkeditCmd = linkeditIndex === -1 ? undefined : commands[linkeditIndex]
+			if (linkeditCmd === undefined) {
+				throw new SEAError('INJECT', 'Mach-O binary has no __LINKEDIT segment', {
+					executable: exePath,
+				})
+			}
+
+			const Loff = Number(buf.readBigUInt64LE(linkeditCmd.offset + 40))
+			const Lsize = Number(buf.readBigUInt64LE(linkeditCmd.offset + 48))
+			const Lvm = buf.readBigUInt64LE(linkeditCmd.offset + 24)
+
+			const blobSize = statSync(this.#options.blob).size
+			// arm64 (0x0100000c) requires 16K pages; every other architecture (x86_64
+			// etc.) uses 4K — 0x4000 is a safe superset alignment for either.
+			const pageSize = cputype === 0x0100000c ? 0x4000 : 0x1000
+			const shift = this.#align(blobSize, pageSize)
+
+			// --- Ceiling check BEFORE mutating anything: the enlarged load-command
+			// region (plus 16 bytes reserved for codesign re-adding
+			// LC_CODE_SIGNATURE) must not overrun the first real section's bytes.
+			// The sentinel starts at the FULL file size (not the bounded `buf`
+			// size) — it represents "no section found yet", not a hard ceiling. ---
+			let firstSectionOffset = fileSize
+			for (const cmd of commands) {
+				if (cmd.type !== MACHO_LC_SEGMENT_64) continue
+				const nsects = buf.readUInt32LE(cmd.offset + 64)
+				for (let s = 0; s < nsects; s++) {
+					const sectOff = cmd.offset + 72 + s * 80
+					if (sectOff + 80 > buf.length) continue
+					const size = Number(buf.readBigUInt64LE(sectOff + 40))
+					const offset = buf.readUInt32LE(sectOff + 48)
+					if (size > 0 && offset > 0 && offset < firstSectionOffset) {
+						firstSectionOffset = offset
 					}
-					buf.writeBigUInt64LE(Lvm + BigInt(shift), cmd.offset + 24) // vmaddr
-					buf.writeBigUInt64LE(BigInt(Loff + shift), cmd.offset + 40) // fileoff
-					// filesize/vmsize unchanged — __LINKEDIT keeps its size, only moves.
 				}
-				continue
 			}
 
-			this.#shiftMachoLinkeditOffsets(buf, cmd, Loff, shift)
-		}
+			const newCmdSize = 72 + 80
+			const removedSize = commands
+				.filter((_c, i) => existingSegmentIndices.includes(i))
+				.reduce((sum, c) => sum + c.size, 0)
+			const newNcmds = commands.length - existingSegmentIndices.length + 1
+			const newSizeofcmds = sizeofcmds - removedSize + newCmdSize
 
-		buf.writeUInt32LE(newNcmds, 16)
-		buf.writeUInt32LE(newSizeofcmds, 20)
-
-		// --- Build the new NODE_SEA segment command: it takes __LINKEDIT's
-		// OLD slot (before __LINKEDIT), inserted before __LINKEDIT so
-		// codesign's appended signature at EOF (inside __LINKEDIT) survives. ---
-		const cmd = Buffer.alloc(newCmdSize)
-		cmd.writeUInt32LE(MACHO_LC_SEGMENT_64, 0)
-		cmd.writeUInt32LE(newCmdSize, 4)
-		cmd.write(segmentName, 8, 16, 'ascii')
-		cmd.writeBigUInt64LE(Lvm, 24) // vmaddr
-		cmd.writeBigUInt64LE(BigInt(shift), 32) // vmsize
-		cmd.writeBigUInt64LE(BigInt(Loff), 40) // fileoff
-		cmd.writeBigUInt64LE(BigInt(shift), 48) // filesize
-		cmd.writeUInt32LE(1, 56) // maxprot: VM_PROT_READ
-		cmd.writeUInt32LE(1, 60) // initprot: VM_PROT_READ
-		cmd.writeUInt32LE(1, 64) // nsects
-		cmd.writeUInt32LE(0, 68) // flags
-
-		const sectOff = 72
-		cmd.write(sectionName, sectOff, 16, 'ascii')
-		cmd.write(segmentName, sectOff + 16, 16, 'ascii')
-		cmd.writeBigUInt64LE(Lvm, sectOff + 32) // addr
-		cmd.writeBigUInt64LE(BigInt(blobSize), sectOff + 40) // size
-		cmd.writeUInt32LE(Loff, sectOff + 48) // offset
-		cmd.writeUInt32LE(0, sectOff + 52) // align
-		cmd.writeUInt32LE(0, sectOff + 56) // reloff
-		cmd.writeUInt32LE(0, sectOff + 60) // nreloc
-		cmd.writeUInt32LE(0, sectOff + 64) // flags
-		cmd.writeUInt32LE(0, sectOff + 68) // reserved1
-		cmd.writeUInt32LE(0, sectOff + 72) // reserved2
-		cmd.writeUInt32LE(0, sectOff + 76) // reserved3
-
-		const pieces: Buffer[] = []
-		for (let i = 0; i < commands.length; i++) {
-			if (existingSegmentIndices.includes(i)) continue
-			const c = commands[i]
-			if (c === undefined) continue
-			// Insert the new NODE_SEA segment command immediately before
-			// __LINKEDIT so segment commands stay in ascending vmaddr order and
-			// __LINKEDIT remains the textually-last segment, as dyld/codesign
-			// require.
-			if (i === linkeditIndex) {
-				pieces.push(cmd)
+			if (headerSize + newSizeofcmds + 16 > firstSectionOffset) {
+				throw new SEAError(
+					'INJECT',
+					`Not enough header space for new Mach-O load command ` +
+						`(need offset ${String(headerSize + newSizeofcmds + 16)}, first section at ${String(firstSectionOffset)})`,
+					{
+						executable: exePath,
+						firstSectionOffset,
+						requiredOffset: headerSize + newSizeofcmds + 16,
+					},
+				)
 			}
-			pieces.push(Buffer.from(buf.subarray(c.offset, c.offset + c.size)))
-		}
-		const newLoadCmdsBuf = Buffer.concat(pieces)
-		if (newLoadCmdsBuf.length !== newSizeofcmds) {
-			throw new SEAError('INJECT', 'Internal Mach-O load command size mismatch', {
-				executable: exePath,
-			})
-		}
 
-		// --- Rewrite the file: header+LCs, unchanged body up to Loff, the
-		// blob (streamed, padded to `shift`), then the relocated __LINKEDIT. ---
-		// The unchanged body is sliced starting from the NEW command-region end
-		// (not the old sizeofcmds) — the ceiling check above guarantees
-		// [headerSize + sizeofcmds, headerSize + newSizeofcmds) lies entirely in
-		// inter-command padding, so discarding those bytes absorbs the growth
-		// and keeps every recorded section/segment offset (computed assuming no
-		// shift) correct. Slicing from the OLD sizeofcmds instead would shift
-		// the entire __TEXT/__DATA body forward by the growth delta, corrupting
-		// every offset already written into the new load commands.
-		const prefix = Buffer.concat([
-			buf.subarray(0, headerSize),
-			newLoadCmdsBuf,
-			buf.subarray(headerSize + newSizeofcmds, Loff),
-		])
-		writeFileSync(exePath, prefix)
+			// --- Mutate in place: shift __LINKEDIT and every linkedit-relative
+			// offset field in the surviving commands, using the ORIGINAL Loff as
+			// the "does this offset point into __LINKEDIT" threshold. ---
+			for (let i = 0; i < commands.length; i++) {
+				const cmd = commands[i]
+				if (cmd === undefined || existingSegmentIndices.includes(i)) continue
 
-		this.#appendFile(exePath, this.#options.blob)
-		const blobPadding = shift - blobSize
-		if (blobPadding > 0) {
-			appendFileSync(exePath, Buffer.alloc(blobPadding))
+				if (cmd.type === MACHO_LC_SEGMENT_64) {
+					const segName = this.#stripTrailingNulls(
+						buf.subarray(cmd.offset + 8, cmd.offset + 24).toString('ascii'),
+					)
+					if (segName === '__LINKEDIT') {
+						const nsects = buf.readUInt32LE(cmd.offset + 64)
+						if (nsects > 0) {
+							throw new SEAError('INJECT', '__LINKEDIT segment with sections is not supported', {
+								executable: exePath,
+							})
+						}
+						buf.writeBigUInt64LE(Lvm + BigInt(shift), cmd.offset + 24) // vmaddr
+						buf.writeBigUInt64LE(BigInt(Loff + shift), cmd.offset + 40) // fileoff
+						// filesize/vmsize unchanged — __LINKEDIT keeps its size, only moves.
+					}
+					continue
+				}
+
+				this.#shiftMachoLinkeditOffsets(buf, cmd, Loff, shift)
+			}
+
+			buf.writeUInt32LE(newNcmds, 16)
+			buf.writeUInt32LE(newSizeofcmds, 20)
+
+			// --- Build the new NODE_SEA segment command: it takes __LINKEDIT's
+			// OLD slot (before __LINKEDIT), inserted before __LINKEDIT so
+			// codesign's appended signature at EOF (inside __LINKEDIT) survives. ---
+			const cmd = Buffer.alloc(newCmdSize)
+			cmd.writeUInt32LE(MACHO_LC_SEGMENT_64, 0)
+			cmd.writeUInt32LE(newCmdSize, 4)
+			cmd.write(segmentName, 8, 16, 'ascii')
+			cmd.writeBigUInt64LE(Lvm, 24) // vmaddr
+			cmd.writeBigUInt64LE(BigInt(shift), 32) // vmsize
+			cmd.writeBigUInt64LE(BigInt(Loff), 40) // fileoff
+			cmd.writeBigUInt64LE(BigInt(shift), 48) // filesize
+			cmd.writeUInt32LE(1, 56) // maxprot: VM_PROT_READ
+			cmd.writeUInt32LE(1, 60) // initprot: VM_PROT_READ
+			cmd.writeUInt32LE(1, 64) // nsects
+			cmd.writeUInt32LE(0, 68) // flags
+
+			const sectOff = 72
+			cmd.write(sectionName, sectOff, 16, 'ascii')
+			cmd.write(segmentName, sectOff + 16, 16, 'ascii')
+			cmd.writeBigUInt64LE(Lvm, sectOff + 32) // addr
+			cmd.writeBigUInt64LE(BigInt(blobSize), sectOff + 40) // size
+			cmd.writeUInt32LE(Loff, sectOff + 48) // offset
+			cmd.writeUInt32LE(0, sectOff + 52) // align
+			cmd.writeUInt32LE(0, sectOff + 56) // reloff
+			cmd.writeUInt32LE(0, sectOff + 60) // nreloc
+			cmd.writeUInt32LE(0, sectOff + 64) // flags
+			cmd.writeUInt32LE(0, sectOff + 68) // reserved1
+			cmd.writeUInt32LE(0, sectOff + 72) // reserved2
+			cmd.writeUInt32LE(0, sectOff + 76) // reserved3
+
+			const pieces: Buffer[] = []
+			for (let i = 0; i < commands.length; i++) {
+				if (existingSegmentIndices.includes(i)) continue
+				const c = commands[i]
+				if (c === undefined) continue
+				// Insert the new NODE_SEA segment command immediately before
+				// __LINKEDIT so segment commands stay in ascending vmaddr order and
+				// __LINKEDIT remains the textually-last segment, as dyld/codesign
+				// require.
+				if (i === linkeditIndex) {
+					pieces.push(cmd)
+				}
+				pieces.push(Buffer.from(buf.subarray(c.offset, c.offset + c.size)))
+			}
+			const newLoadCmdsBuf = Buffer.concat(pieces)
+			if (newLoadCmdsBuf.length !== newSizeofcmds) {
+				throw new SEAError('INJECT', 'Internal Mach-O load command size mismatch', {
+					executable: exePath,
+				})
+			}
+
+			// --- Stream-write to a sibling temp, then atomically rename over
+			// exePath: header+LCs, unchanged body up to Loff (streamed from
+			// srcFd), the blob (streamed from its own fd, padded to `shift`),
+			// then the relocated __LINKEDIT (streamed from srcFd). The body
+			// range starts at the NEW command-region end (not the old
+			// sizeofcmds) — the ceiling check above guarantees
+			// [headerSize + sizeofcmds, headerSize + newSizeofcmds) lies entirely
+			// in inter-command padding, so discarding those bytes absorbs the
+			// growth and keeps every recorded section/segment offset (computed
+			// assuming no shift) correct. Starting from the OLD sizeofcmds
+			// instead would shift the entire __TEXT/__DATA body forward by the
+			// growth delta, corrupting every offset already written into the new
+			// load commands. ---
+			const mode = fstatSync(srcFd).mode
+			injTemp = join(dirname(exePath), `.inject-${randomUUID()}.tmp`)
+			destFd = openSync(injTemp, 'w', mode)
+
+			writeSync(destFd, buf.subarray(0, headerSize))
+			writeSync(destFd, newLoadCmdsBuf)
+			copyRange(srcFd, destFd, headerSize + newSizeofcmds, Loff - (headerSize + newSizeofcmds))
+
+			blobFd = openSync(this.#options.blob, 'r')
+			copyRange(blobFd, destFd, 0, blobSize)
+			closeSync(blobFd)
+			blobFd = undefined
+
+			const blobPadding = shift - blobSize
+			if (blobPadding > 0) {
+				writeSync(destFd, Buffer.alloc(blobPadding))
+			}
+			copyRange(srcFd, destFd, Loff, Lsize)
+
+			closeSync(destFd)
+			destFd = undefined
+
+			// openSync's mode is masked by umask, which can silently drop the
+			// exec bit; chmod is not masked, so it reproduces the host binary's
+			// permissions exactly before the temp replaces the original.
+			chmodSync(injTemp, mode & 0o7777)
+			finalizeExecutable(injTemp, exePath)
+			injTemp = undefined
+
+			// Build-time readback: verify the section by its section table entry,
+			// consistent with what was just written.
+			this.#verifyMachoSection(exePath, segmentName, sectionName, Loff, blobSize)
+		} finally {
+			// Guard each close so a throw from one does not skip the rest of the
+			// cleanup (a leaked fd or a stray temp masking the original error).
+			for (const fd of [blobFd, destFd, srcFd]) {
+				if (fd !== undefined) {
+					try {
+						closeSync(fd)
+					} catch {
+						// fd may already be closed or invalid; cleanup must not throw.
+					}
+				}
+			}
+			if (injTemp !== undefined) rmSync(injTemp, { force: true })
 		}
-		appendFileSync(exePath, buf.subarray(Loff, Loff + Lsize))
-
-		// Build-time readback: verify the section by its section table entry,
-		// consistent with what was just written.
-		this.#verifyMachoSection(exePath, segmentName, sectionName, Loff, blobSize)
 	}
 
 	// --- Mach-O: shift every linkedit-relative offset field in a load command
