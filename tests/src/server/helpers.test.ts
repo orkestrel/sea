@@ -1,8 +1,10 @@
-import { existsSync, readFileSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+	compressDirectory,
 	createBlobConfig,
+	createSignCommand,
 	ensureContained,
 	ensureSafeKey,
 	ensureSafeName,
@@ -11,6 +13,7 @@ import {
 	isShellError,
 	openBrowser,
 	runShell,
+	syncDirectory,
 	walkDirectory,
 } from '@src/server'
 import { withTestDir } from '../../setupServer.js'
@@ -44,6 +47,32 @@ describe('helpers', () => {
 
 			expect(isShellError(error) && error.code === 'SHELL').toBe(true)
 			expect(isShellError(error) && Buffer.isBuffer(error.stderr)).toBe(true)
+		})
+
+		it('redacts a /p secret from a ShellError message on a non-zero exit', () => {
+			const error = captureError(() => {
+				return runShell([process.execPath, '-e', 'process.exit(3)', '/p', 'SECRETVALUE'])
+			})
+
+			expect(isShellError(error) && error.message.includes('SECRETVALUE')).toBe(false)
+			expect(isShellError(error) && error.message.includes('***')).toBe(true)
+		})
+
+		it('redacts a /p secret from the SEAError context on an already-aborted signal', () => {
+			const controller = new AbortController()
+			controller.abort()
+
+			const error = captureError(() => {
+				return runShell(['signtool', '/p', 'SECRETVALUE'], { signal: controller.signal })
+			})
+
+			const context = isSEAError(error) ? error.context : undefined
+			const command = context !== undefined ? context.command : undefined
+			const serialized = JSON.stringify(command)
+
+			expect(isSEAError(error) && error.code === 'ABORT').toBe(true)
+			expect(serialized.includes('SECRETVALUE')).toBe(false)
+			expect(serialized.includes('***')).toBe(true)
 		})
 	})
 
@@ -232,6 +261,91 @@ describe('helpers', () => {
 				},
 			)
 		})
+
+		it('returns entries in deterministic byte-sorted order', async () => {
+			await withTestDir(
+				{
+					'root/charlie.txt': 'c',
+					'root/alpha.txt': 'a',
+					'root/bravo/inside.txt': 'b',
+				},
+				(dir) => {
+					const root = join(dir.root, 'root')
+					const files = [...walkDirectory(root)]
+					const sorted = [...files].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+
+					expect(files).toEqual(sorted)
+				},
+			)
+		})
+	})
+
+	describe('compressDirectory', () => {
+		it('invokes the progress callback once per compressible file', async () => {
+			await withTestDir(
+				{
+					'root/a.html': '<p>a</p>',
+					'root/b.html': '<p>b</p>',
+					'root/c.png': 'not-really-a-png',
+				},
+				(dir) => {
+					const root = join(dir.root, 'root')
+					const results: string[] = []
+
+					const manifest = compressDirectory(root, undefined, (result) => {
+						results.push(result.input)
+					})
+
+					expect(results).toHaveLength(2)
+					expect(manifest.assets).toHaveLength(2)
+				},
+			)
+		})
+	})
+
+	describe('syncDirectory', () => {
+		it('does not throw for a real directory', async () => {
+			await withTestDir(
+				{
+					'root/marker.txt': 'marker',
+				},
+				(dir) => {
+					const root = join(dir.root, 'root')
+
+					expect(() => {
+						syncDirectory(root)
+					}).not.toThrow()
+				},
+			)
+		})
+
+		it('throws SEAError with code OUTPUT for a nonexistent path', async () => {
+			await withTestDir({}, (dir) => {
+				const missing = join(dir.root, 'does-not-exist')
+
+				const error = captureError(() => {
+					syncDirectory(missing)
+				})
+
+				if (process.platform === 'win32') {
+					// syncDirectory is a no-op on win32 — nothing to assert.
+					return
+				}
+
+				expect(isSEAError(error) && error.code === 'OUTPUT').toBe(true)
+			})
+		})
+
+		it('is a no-op-safe call after mkdirSync creates the directory', async () => {
+			await withTestDir({}, (dir) => {
+				const created = join(dir.root, 'created')
+				mkdirSync(created)
+
+				expect(() => {
+					syncDirectory(created)
+				}).not.toThrow()
+			})
+		})
 	})
 
 	describe('openBrowser', () => {
@@ -264,6 +378,162 @@ describe('helpers', () => {
 			})
 
 			expect(isSEAError(error) && error.code === 'BROWSER').toBe(true)
+		})
+	})
+
+	describe('createSignCommand', () => {
+		it('builds argv for a cert file + password', () => {
+			const argv = createSignCommand(
+				{ file: 'cert.pfx', password: 'dummy-password' },
+				'dist/app.exe',
+			)
+
+			expect(argv).toEqual([
+				'signtool',
+				'sign',
+				'/fd',
+				'sha256',
+				'/f',
+				'cert.pfx',
+				'/p',
+				'dummy-password',
+				'dist/app.exe',
+			])
+		})
+
+		it('builds argv for a store thumbprint', () => {
+			const argv = createSignCommand(
+				{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' },
+				'dist/app.exe',
+			)
+
+			expect(argv).toEqual([
+				'signtool',
+				'sign',
+				'/fd',
+				'sha256',
+				'/sha1',
+				'AABBCCDDEEFF00112233445566778899AABBCCDD',
+				'dist/app.exe',
+			])
+		})
+
+		it('appends /tr and /td when a timestamp is set', () => {
+			const argv = createSignCommand(
+				{
+					thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD',
+					timestamp: 'http://timestamp.example.com',
+				},
+				'dist/app.exe',
+			)
+
+			expect(argv).toEqual([
+				'signtool',
+				'sign',
+				'/fd',
+				'sha256',
+				'/sha1',
+				'AABBCCDDEEFF00112233445566778899AABBCCDD',
+				'/tr',
+				'http://timestamp.example.com',
+				'/td',
+				'sha256',
+				'dist/app.exe',
+			])
+		})
+
+		it('uses a custom digest for /fd and /td', () => {
+			const argv = createSignCommand(
+				{
+					thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD',
+					timestamp: 'https://timestamp.example.com',
+					digest: 'sha1',
+				},
+				'dist/app.exe',
+			)
+
+			expect(argv).toEqual([
+				'signtool',
+				'sign',
+				'/fd',
+				'sha1',
+				'/sha1',
+				'AABBCCDDEEFF00112233445566778899AABBCCDD',
+				'/tr',
+				'https://timestamp.example.com',
+				'/td',
+				'sha1',
+				'dist/app.exe',
+			])
+		})
+
+		it('throws SEAError code SIGN when neither file nor thumbprint is set', () => {
+			const error = captureError(() => {
+				createSignCommand({}, 'dist/app.exe')
+			})
+
+			expect(isSEAError(error) && error.code === 'SIGN').toBe(true)
+		})
+
+		it('throws SEAError code SIGN when both file and thumbprint are set', () => {
+			const error = captureError(() => {
+				createSignCommand(
+					{ file: 'cert.pfx', thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' },
+					'dist/app.exe',
+				)
+			})
+
+			expect(isSEAError(error) && error.code === 'SIGN').toBe(true)
+		})
+
+		it('throws SEAError code SIGN when timestamp is not an http(s) URL', () => {
+			const error = captureError(() => {
+				createSignCommand(
+					{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', timestamp: 'ftp://x' },
+					'dist/app.exe',
+				)
+			})
+
+			expect(isSEAError(error) && error.code === 'SIGN').toBe(true)
+		})
+
+		it('throws SEAError code SIGN when timestamp is unparseable', () => {
+			const error = captureError(() => {
+				createSignCommand(
+					{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', timestamp: 'not a url' },
+					'dist/app.exe',
+				)
+			})
+
+			expect(isSEAError(error) && error.code === 'SIGN').toBe(true)
+		})
+
+		it('throws SEAError code SIGN for an unsupported digest', () => {
+			const error = captureError(() => {
+				createSignCommand(
+					{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', digest: 'md5' },
+					'dist/app.exe',
+				)
+			})
+
+			expect(isSEAError(error) && error.code === 'SIGN').toBe(true)
+		})
+
+		it('accepts sha384 and emits it for /fd', () => {
+			const argv = createSignCommand(
+				{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', digest: 'sha384' },
+				'dist/app.exe',
+			)
+
+			expect(argv).toEqual([
+				'signtool',
+				'sign',
+				'/fd',
+				'sha384',
+				'/sha1',
+				'AABBCCDDEEFF00112233445566778899AABBCCDD',
+				'dist/app.exe',
+			])
 		})
 	})
 })

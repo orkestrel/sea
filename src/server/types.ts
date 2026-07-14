@@ -52,13 +52,30 @@ export interface SEACompressionResult {
  *
  * @remarks
  * Generated after a full directory compression pass.
- * `timestamp` is the ISO 8601 timestamp.
  */
 export interface SEACompressionManifest {
-	readonly timestamp: string
 	readonly assets: readonly SEACompressionResult[]
 	readonly total: SEACompressionSize
 }
+
+/**
+ * Progress reported while compressing a directory.
+ *
+ * @remarks
+ * `path`    — absolute path to the file just compressed.
+ * `current` — number of files compressed so far (1-based).
+ * `total`   — total number of compressible files.
+ */
+export interface SEAProgress {
+	readonly path: string
+	readonly current: number
+	readonly total: number
+}
+
+/**
+ * Callback invoked by the framework after each file is compressed.
+ */
+export type SEAProgressHandler = (result: SEACompressionResult) => void
 
 /**
  * Options controlling Brotli compression of one or more directories.
@@ -308,6 +325,7 @@ export interface SEABlobOptions {
 /** Events emitted by a {@link SEAInterface}. */
 export type SEAEventMap = {
 	compress: readonly [compression: SEACompressionManifest | undefined]
+	progress: readonly [progress: SEAProgress]
 	blob: readonly [blob: string]
 	assemble: readonly [executable: string]
 	complete: readonly [result: SEAResult]
@@ -347,9 +365,43 @@ export interface SEAOptions {
  *
  * @remarks
  * `subsystem` — Windows PE subsystem to patch onto the output executable.
+ * `sign`      — Authenticode signing options. When present, the assembled
+ * executable is signed with `signtool` (and verified) as the LAST content
+ * mutation before the atomic finalize; when absent, the output is unsigned
+ * and `SEAResult.signed` is `false` (unchanged default behavior).
+ *
+ * These options apply only when the build HOST is Windows — there is no
+ * cross-compilation, so building on a non-Windows host ignores `windows.*`.
  */
 export interface SEAWindowsOptions {
 	readonly subsystem?: WindowsSubsystem
+	readonly sign?: SEAWindowsSignOptions
+}
+
+/**
+ * Windows Authenticode signing options, passed through to `signtool`.
+ *
+ * @remarks
+ * `file`       — path to a `.pfx`/`.p12` certificate file (`signtool /f`).
+ * `password`   — certificate password (`signtool /p`). SENSITIVE — never
+ * logged and never included in a thrown error's message or `context`.
+ * `thumbprint` — SHA1 thumbprint of a certificate already installed in the
+ * Windows certificate store (`signtool /sha1`).
+ * `timestamp`  — RFC3161 timestamp server URL (`signtool /tr`, paired with
+ * `/td <digest>`).
+ * `digest`     — file digest algorithm (`signtool /fd`). Default: `'sha256'`.
+ *
+ * Exactly ONE of `file` or `thumbprint` must be supplied — they identify two
+ * different certificate sources and are mutually exclusive. `password`
+ * pairs with `file` (a store-resident certificate referenced by
+ * `thumbprint` has no associated password to supply here).
+ */
+export interface SEAWindowsSignOptions {
+	readonly file?: string
+	readonly password?: string
+	readonly thumbprint?: string
+	readonly timestamp?: string
+	readonly digest?: string
 }
 
 /**

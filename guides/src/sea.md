@@ -22,7 +22,9 @@ process.stdout.write(
 )
 ```
 
-`sea.execute()` runs the three-step pipeline — compress assets, generate the blob, assemble and sign the executable — and transitions `sea.status` from `'idle'` to `'active'` to `'done'` (or `'error'`). `sea.emitter` reports progress on `compress`, `blob`, `assemble`, and `complete`.
+`sea.execute()` runs the three-step pipeline — compress assets, generate the blob, assemble and sign the executable — and transitions `sea.status` from `'idle'` to `'active'` to `'done'` (or `'error'`). `sea.emitter` reports progress on `compress`, `progress` (once per compressed file, with `current`/`total` counts), `blob`, `assemble`, and `complete`.
+
+On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When present, the assembled executable is signed with `signtool` (cert `file` + `password`, or a store `thumbprint` — exactly one of the two) and verified as the LAST content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`), matching prior behavior exactly. `createSignCommand` builds the `signtool` argv and is available standalone.
 
 `SEAOptions.entry` is a `SEAEntryOptions` object (`{ path, format? }`) rather than a bare path — `format` selects the entry module format (`'cjs'` default, or `'esm'` on Node >= 25.7). Every domain failure throws a `SEAError` carrying a machine-readable `SEAErrorCode`; narrow a caught value with `isSEAError`. `SEAResult` additionally reports `signed`, `stripped`, and the patched `subsystem` (Windows only).
 
@@ -102,11 +104,13 @@ process.stdout.write(
 | `isPEExecutable`      | function | Check if a file is a Windows PE executable.                                     |
 | `patchPESubsystem`    | function | Patch the PE subsystem field in a Windows executable.                           |
 | `stripPESignature`    | function | Remove the Authenticode signature from a PE executable.                         |
+| `createSignCommand`   | function | Build the `signtool sign` argv for signing a Windows executable.                |
 | `formatSize`          | function | Format a byte count as a human-readable string.                                 |
 | `ensureSafeKey`       | function | Assert that an asset key is safe to use as a relative filesystem key.           |
 | `ensureContained`     | function | Assert a path real-path-resolves inside a base root (blocks symlink escape).    |
 | `ensureSafeName`      | function | Assert that a name is a single safe path segment (output executable base name). |
 | `finalizeExecutable`  | function | Durably flush and atomically move a built executable into place.                |
+| `syncDirectory`       | function | Fsync a directory to durably persist a prior file rename/create within it.      |
 | `createBlobConfig`    | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
 | `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                          |
 | `openBrowser`         | function | Launch the system default browser at an http(s) URL.                            |
@@ -124,6 +128,8 @@ process.stdout.write(
 | `SEACompressionInput`    | interface | Input describing a single file to Brotli-compress.                           |
 | `SEACompressionResult`   | interface | Result of compressing a single file.                                         |
 | `SEACompressionManifest` | interface | Manifest summarizing all compressed assets.                                  |
+| `SEAProgress`            | interface | Progress reported while compressing a directory (`path`/`current`/`total`).  |
+| `SEAProgressHandler`     | type      | Callback invoked by the framework after each file is compressed.             |
 | `SEACompressionOptions`  | interface | Options controlling Brotli compression of one or more directories.           |
 | `SEAPlatform`            | interface | Platform-specific SEA build configuration.                                   |
 | `WindowsSubsystem`       | type      | Windows PE subsystem identifier (`console` / `gui`).                         |
@@ -145,6 +151,7 @@ process.stdout.write(
 | `SEAEventMap`            | type      | Events emitted by a `SEAInterface`.                                          |
 | `SEAOptions`             | interface | Options for creating a SEA build.                                            |
 | `SEAWindowsOptions`      | interface | Windows-specific SEA build options.                                          |
+| `SEAWindowsSignOptions`  | interface | Windows Authenticode signing options, passed through to `signtool`.          |
 | `SEAResult`              | interface | Result of a successful seal build (adds `signed`, `stripped`, `subsystem`).  |
 | `SEAInterface`           | interface | SEA build orchestrator contract.                                             |
 
@@ -211,6 +218,8 @@ import {
 	ensureContained,
 	ensureSafeName,
 	openBrowser,
+	createSignCommand,
+	syncDirectory,
 } from '@orkestrel/sea'
 
 try {
@@ -246,6 +255,11 @@ ensureContained('/dist/app', 'browser') // real, symlink-resolved path inside th
 
 openBrowser('http://localhost:3000') // best-effort launch of the system default browser
 ensureSafeName('myapp') // ok; throws SEAError('ASSET', ...) for '../evil' or 'a/b'
+
+createSignCommand({ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' }, 'dist/sea/app.exe')
+// ['signtool', 'sign', '/fd', 'sha256', '/sha1', 'AABBCCDDEEFF00112233445566778899AABBCCDD', 'dist/sea/app.exe']
+
+syncDirectory('/dist/sea') // fsync a directory to durably persist a prior rename/create; no-op on win32
 ```
 
 ## See also

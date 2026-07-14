@@ -37,17 +37,20 @@ import {
 import {
 	compressDirectory,
 	createBlobConfig,
+	createSignCommand,
 	ensureContained,
 	ensureExists,
 	ensureSafeKey,
 	ensureSafeName,
 	finalizeExecutable,
+	isCompressible,
 	isPEExecutable,
 	isPlatformSupported,
 	patchPESubsystem,
 	platformConfig,
 	runShell,
 	stripPESignature,
+	walkDirectory,
 } from '../helpers.js'
 import { SEAError } from '../errors.js'
 import { Injector } from '../injectors/Injector.js'
@@ -160,6 +163,18 @@ export class SEA implements SEAInterface {
 			ensureSafeKey(path)
 			ensureContained(base, path)
 		}
+
+		const sign = this.#options.windows?.sign
+		if (sign !== undefined) {
+			// Trigger the file-XOR-thumbprint and timestamp-scheme validation
+			// fail-fast, before any build work runs. The placeholder target is
+			// never executed here — createSignCommand is a pure argv builder.
+			createSignCommand(sign, 'placeholder')
+
+			if (sign.file !== undefined) {
+				ensureExists(resolve(base, sign.file), 'Certificate file not found', 'SIGN')
+			}
+		}
 	}
 
 	#compress(root: string): SEACompressionManifest | undefined {
@@ -169,25 +184,34 @@ export class SEA implements SEAInterface {
 			return undefined
 		}
 
+		const directories: string[] = []
+		let total = 0
+		for (const path of compression.paths) {
+			const candidate = resolve(root, path)
+			if (!existsSync(candidate)) continue
+			this.#check()
+			const directory = ensureContained(root, path)
+			directories.push(directory)
+			total += walkDirectory(directory).filter(isCompressible).length
+		}
+
 		const assets: SEACompressionManifest['assets'][number][] = []
 		let original = 0
 		let compressed = 0
+		let current = 0
 
-		for (const path of compression.paths) {
+		for (const directory of directories) {
 			this.#check()
-			const directory = resolve(root, path)
-			if (!existsSync(directory)) {
-				continue
-			}
-
-			const manifest = compressDirectory(directory, compression)
+			const manifest = compressDirectory(directory, compression, (result) => {
+				current += 1
+				this.#emitter.emit('progress', { path: result.input, current, total })
+			})
 			assets.push(...manifest.assets)
 			original += manifest.total.original
 			compressed += manifest.total.compressed
 		}
 
 		const manifest: SEACompressionManifest = {
-			timestamp: new Date().toISOString(),
 			assets,
 			total: {
 				original,
@@ -328,14 +352,20 @@ export class SEA implements SEAInterface {
 				})
 				injector.inject()
 
-				if (platform.sign !== undefined) {
+				const sign = this.#options.windows?.sign
+				if (sign !== undefined) {
 					this.#check()
+					// Resolve the certificate file against the SAME base #validate
+					// checked existence against — createSignCommand's argv is passed
+					// through runShell without a cwd, so a relative sign.file would
+					// otherwise resolve against process.cwd(), a different file.
+					const signInput =
+						sign.file !== undefined ? { ...sign, file: resolve(root, sign.file) } : sign
+					const signArgs = createSignCommand(signInput, temp)
 					try {
-						runShell([...platform.sign, temp], { signal: this.#options.signal })
-					} catch (thrown: unknown) {
-						throw new SEAError('SIGN', 'Failed to sign executable', {
-							cause: thrown instanceof Error ? thrown.message : String(thrown),
-						})
+						runShell(signArgs, { signal: this.#options.signal })
+					} catch {
+						throw new SEAError('SIGN', 'Windows signing failed', { executable: temp })
 					}
 					signed = true
 
@@ -343,10 +373,8 @@ export class SEA implements SEAInterface {
 						this.#check()
 						try {
 							runShell([...platform.verify, temp], { signal: this.#options.signal })
-						} catch (thrown: unknown) {
-							throw new SEAError('SIGN', 'Signature verification failed', {
-								cause: thrown instanceof Error ? thrown.message : String(thrown),
-							})
+						} catch {
+							throw new SEAError('SIGN', 'Signature verification failed', { executable: temp })
 						}
 					}
 				}
@@ -378,7 +406,7 @@ export class SEA implements SEAInterface {
 	#assets(root: string): Readonly<Record<string, string>> {
 		const assets: Record<string, string> = {}
 		for (const [name, path] of Object.entries(this.#options.assets ?? {})) {
-			assets[name] = resolve(root, path)
+			assets[name] = ensureContained(root, path)
 		}
 		return assets
 	}

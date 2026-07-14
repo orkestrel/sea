@@ -123,7 +123,7 @@ export const SEA_PLATFORMS: Readonly<Record<string, SEAPlatform>> = Object.freez
 		executable: 'node.exe',
 		remove: undefined,
 		sign: undefined,
-		verify: undefined,
+		verify: Object.freeze(['signtool', 'verify', '/pa']),
 	}),
 	darwin: Object.freeze({
 		executable: 'node',

@@ -133,6 +133,7 @@ export class AssetManager implements AssetManagerInterface {
 	#loadSea(): void {
 		if (isSea()) {
 			const assetKeys: readonly string[] = getAssetKeys()
+			const registered: string[] = []
 			for (const key of assetKeys) {
 				const content: ArrayBuffer = getRawAsset(key)
 				this.#add({
@@ -140,6 +141,10 @@ export class AssetManager implements AssetManagerInterface {
 					content,
 					compressed: key.endsWith(BROTLI_EXTENSION),
 				})
+				registered.push(key)
+			}
+			if (registered.length > 0) {
+				this.#emitter.emit('load', registered)
 			}
 		}
 	}

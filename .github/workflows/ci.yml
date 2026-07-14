@@ -4,10 +4,6 @@ on:
   push:
   pull_request:
 
-# A publish.yml with `permissions: id-token: write` and
-# `npm publish --provenance` (npm provenance / OIDC trusted publishing) is a
-# documented follow-up — not yet implemented (see SECURITY.md hardening roadmap).
-
 jobs:
   gates:
     runs-on: ${{ matrix.os }}

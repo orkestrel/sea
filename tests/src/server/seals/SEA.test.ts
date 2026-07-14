@@ -321,11 +321,193 @@ describe('SEA', () => {
 		)
 	})
 
+	it('emits progress once per compressible file with an accurate running total', async (context) => {
+		await withTestDir(
+			{
+				'entry.cjs': "console.log('hello from seal')\n",
+				'assets/a.html': '<p>a</p>',
+				'assets/b.html': '<p>b</p>',
+				'assets/c.png': 'not-really-a-png',
+			},
+			async (dir) => {
+				const progress: Array<{ current: number; total: number }> = []
+				const seal = new SEA(
+					createSEAOptions({
+						root: dir.root,
+						compression: { paths: ['assets'] },
+						on: {
+							progress: (event) => {
+								progress.push({ current: event.current, total: event.total })
+							},
+						},
+					}),
+				)
+
+				try {
+					await seal.execute()
+				} catch (error) {
+					seal.destroy()
+					if (isSEAError(error) && error.code === 'INJECT') {
+						context.skip()
+						return
+					}
+					throw error
+				}
+
+				// assets/c.png is skipped (SKIP_EXTENSIONS), so only a.html and b.html compress.
+				expect(progress).toHaveLength(2)
+				expect(progress.every((event) => event.total === 2)).toBe(true)
+				expect(progress.map((event) => event.current)).toEqual([1, 2])
+
+				seal.destroy()
+			},
+		)
+	})
+
 	it('destroys its emitter', () => {
 		const seal = new SEA(createSEAOptions())
 
 		seal.destroy()
 
 		expect(seal.emitter.destroyed).toBe(true)
+	})
+
+	describe('windows.sign validation', () => {
+		it('rejects a sign config with neither file nor thumbprint, code SIGN, before any compress event fires', async () => {
+			await withTestDir(
+				{
+					'entry.cjs': "console.log('hello from seal')\n",
+				},
+				async (dir) => {
+					const events: string[] = []
+					const seal = new SEA(
+						createSEAOptions({
+							root: dir.root,
+							windows: { sign: {} },
+							on: {
+								compress: () => {
+									events.push('compress')
+								},
+							},
+						}),
+					)
+
+					const error: unknown = await seal.execute().then(
+						() => undefined,
+						(thrown: unknown) => thrown,
+					)
+					expect(isSEAError(error)).toBe(true)
+					expect(isSEAError(error) && error.code).toBe('SIGN')
+
+					expect(events).toHaveLength(0)
+					seal.destroy()
+				},
+			)
+		})
+
+		it('rejects a sign config with both file and thumbprint, code SIGN, before any compress event fires', async () => {
+			await withTestDir(
+				{
+					'entry.cjs': "console.log('hello from seal')\n",
+					'cert.pfx': 'not-a-real-cert',
+				},
+				async (dir) => {
+					const events: string[] = []
+					const seal = new SEA(
+						createSEAOptions({
+							root: dir.root,
+							windows: {
+								sign: {
+									file: 'cert.pfx',
+									thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD',
+								},
+							},
+							on: {
+								compress: () => {
+									events.push('compress')
+								},
+							},
+						}),
+					)
+
+					const error: unknown = await seal.execute().then(
+						() => undefined,
+						(thrown: unknown) => thrown,
+					)
+					expect(isSEAError(error)).toBe(true)
+					expect(isSEAError(error) && error.code).toBe('SIGN')
+
+					expect(events).toHaveLength(0)
+					seal.destroy()
+				},
+			)
+		})
+
+		it('rejects a non-http(s) timestamp, code SIGN, before any compress event fires', async () => {
+			await withTestDir(
+				{
+					'entry.cjs': "console.log('hello from seal')\n",
+					'cert.pfx': 'not-a-real-cert',
+				},
+				async (dir) => {
+					const events: string[] = []
+					const seal = new SEA(
+						createSEAOptions({
+							root: dir.root,
+							windows: {
+								sign: { file: 'cert.pfx', timestamp: 'ftp://timestamp.example.com' },
+							},
+							on: {
+								compress: () => {
+									events.push('compress')
+								},
+							},
+						}),
+					)
+
+					const error: unknown = await seal.execute().then(
+						() => undefined,
+						(thrown: unknown) => thrown,
+					)
+					expect(isSEAError(error)).toBe(true)
+					expect(isSEAError(error) && error.code).toBe('SIGN')
+
+					expect(events).toHaveLength(0)
+					seal.destroy()
+				},
+			)
+		})
+
+		it('rejects a missing certificate file, code SIGN, before any compress event fires', async () => {
+			await withTestDir(
+				{
+					'entry.cjs': "console.log('hello from seal')\n",
+				},
+				async (dir) => {
+					const events: string[] = []
+					const seal = new SEA(
+						createSEAOptions({
+							root: dir.root,
+							windows: { sign: { file: 'missing-cert.pfx' } },
+							on: {
+								compress: () => {
+									events.push('compress')
+								},
+							},
+						}),
+					)
+
+					const error: unknown = await seal.execute().then(
+						() => undefined,
+						(thrown: unknown) => thrown,
+					)
+					expect(isSEAError(error)).toBe(true)
+					expect(isSEAError(error) && error.code).toBe('SIGN')
+
+					expect(events).toHaveLength(0)
+					seal.destroy()
+				},
+			)
+		})
 	})
 })

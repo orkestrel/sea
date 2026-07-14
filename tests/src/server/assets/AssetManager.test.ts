@@ -164,6 +164,13 @@ describe('AssetManager', () => {
 		manager.destroy()
 	})
 
+	// === SEA-embedded load
+	// #loadSea's 'load' event emission runs only when isSea() is true, which
+	// vitest never is — that path is unreachable without a real SEA build and
+	// is not force-tested here. The existing 'emits register events' /
+	// 'clears all registered assets' coverage exercises the same emitter
+	// wiring the 'load' event uses.
+
 	// === destroy
 
 	it('destroys the emitter on destroy', () => {

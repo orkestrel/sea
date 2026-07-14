@@ -8,7 +8,9 @@ import type {
 	SEAEntryOptions,
 	SEAErrorCode,
 	SEAPlatform,
+	SEAProgressHandler,
 	SEAShellOptions,
+	SEAWindowsSignOptions,
 } from './types.js'
 import {
 	existsSync,
@@ -24,7 +26,7 @@ import {
 	renameSync,
 } from 'node:fs'
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
-import { resolve, relative, join, extname, isAbsolute, sep } from 'node:path'
+import { resolve, relative, join, extname, isAbsolute, sep, dirname } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import {
 	BROTLI_EXTENSION,
@@ -106,6 +108,9 @@ export function walkDirectory(directory: string, base?: string): readonly string
 	const root = base ?? directory
 	const result: string[] = []
 	const entries = readdirSync(directory, { withFileTypes: true })
+	// Sort by byte order (not localeCompare, which is locale-dependent) so
+	// asset order is deterministic across platforms and Node builds.
+	entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 
 	for (const entry of entries) {
 		// Symlinks can escape the compression root (point outside `directory`),
@@ -136,12 +141,27 @@ export function walkDirectory(directory: string, base?: string): readonly string
  * @throws ShellError when the command exits with non-zero status
  */
 export function runShell(command: string[], options?: SEAShellOptions): Buffer {
+	// Replace the argv element following a `/p`, `-p`, or `--password` flag
+	// (case-insensitive) with a redaction marker, so a secret passed as a
+	// discrete argv token (e.g. `signtool /p <password>`) can never leak into
+	// an error message or SEAError context, regardless of caller.
+	function redactCommand(argv: string[]): string[] {
+		const secretFlags = new Set(['/p', '-p', '--password'])
+		return argv.map((token, index) => {
+			const previous = argv[index - 1]
+			if (previous !== undefined && secretFlags.has(previous.toLowerCase())) {
+				return '***'
+			}
+			return token
+		})
+	}
+
 	const [cmd, ...args] = command
 	if (cmd === undefined) {
 		throw new SEAError('STATE', 'Command array must not be empty')
 	}
 	if (options?.signal?.aborted === true) {
-		throw new SEAError('ABORT', 'Shell command aborted', { command })
+		throw new SEAError('ABORT', 'Shell command aborted', { command: redactCommand(command) })
 	}
 	// Node v22+ blocks direct execFileSync of .cmd/.bat files without a shell (EINVAL)
 	const useShell = cmd.endsWith('.cmd') || cmd.endsWith('.bat')
@@ -157,10 +177,11 @@ export function runShell(command: string[], options?: SEAShellOptions): Buffer {
 		if (!(thrown instanceof Error)) {
 			throw thrown
 		}
+		const redacted = redactCommand(command)
 		const code = 'code' in thrown && typeof thrown.code === 'string' ? thrown.code : undefined
 		if (code === 'ETIMEDOUT') {
 			throw new SEAError('TIMEOUT', 'Shell command timed out', {
-				command,
+				command: redacted,
 				timeout: options?.timeout,
 			})
 		}
@@ -168,7 +189,7 @@ export function runShell(command: string[], options?: SEAShellOptions): Buffer {
 			'stdout' in thrown && Buffer.isBuffer(thrown.stdout) ? thrown.stdout : Buffer.alloc(0)
 		const stderr =
 			'stderr' in thrown && Buffer.isBuffer(thrown.stderr) ? thrown.stderr : Buffer.alloc(0)
-		throw new ShellError(thrown.message, stdout, stderr)
+		throw new ShellError('Command failed: ' + redacted.join(' '), stdout, stderr)
 	}
 }
 
@@ -224,11 +245,13 @@ export function compressFile(
  *
  * @param directory - Absolute path to the directory
  * @param options - Compression options
+ * @param progress - Optional callback invoked after each file is compressed
  * @returns Compression manifest with all results
  */
 export function compressDirectory(
 	directory: string,
 	options?: SEACompressionOptions,
+	progress?: SEAProgressHandler,
 ): SEACompressionManifest {
 	const files = walkDirectory(directory)
 	const results: SEACompressionResult[] = []
@@ -244,10 +267,10 @@ export function compressDirectory(
 		results.push(result)
 		totalOriginal += result.size.original
 		totalCompressed += result.size.compressed
+		progress?.(result)
 	}
 
 	return {
-		timestamp: new Date().toISOString(),
 		assets: results,
 		total: computeSize(totalOriginal, totalCompressed),
 	}
@@ -352,6 +375,88 @@ export function stripPESignature(path: string): void {
 	} finally {
 		closeSync(fd)
 	}
+}
+
+// === Signing Helpers
+
+/**
+ * Build the `signtool sign` argv for signing a Windows executable.
+ *
+ * @remarks
+ * Requires EXACTLY ONE certificate source — `sign.file` (a `.pfx`/`.p12`
+ * file, paired with `sign.password` when present) XOR `sign.thumbprint` (a
+ * certificate already installed in the Windows store). When `sign.timestamp`
+ * is set it is parsed with the `URL` constructor and must be an `http:` or
+ * `https:` URL. The returned argv is passed directly to `runShell` — never
+ * through a shell — so nothing in `sign` can be interpreted as a flag or
+ * injected into a command line. `sign.password` is NEVER included in a
+ * thrown error's message or `context`.
+ *
+ * @param sign - Windows signing options
+ * @param target - Absolute path to the executable to sign
+ * @returns The `signtool` argv, ready for `runShell`
+ * @throws SEAError with code `'SIGN'` when neither `file` nor `thumbprint` is set
+ * @throws SEAError with code `'SIGN'` when both `file` and `thumbprint` are set
+ * @throws SEAError with code `'SIGN'` when `timestamp` is not a parseable http(s) URL
+ * @throws SEAError with code `'SIGN'` when `digest` is not `'sha1'`, `'sha256'`, `'sha384'`, or `'sha512'`
+ *
+ * @example
+ * ```ts
+ * createSignCommand({ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' }, 'dist/sea/app.exe')
+ * // ['signtool', 'sign', '/fd', 'sha256', '/sha1', 'AABBCCDDEEFF00112233445566778899AABBCCDD', 'dist/sea/app.exe']
+ * ```
+ */
+export function createSignCommand(sign: SEAWindowsSignOptions, target: string): string[] {
+	const hasFile = sign.file !== undefined
+	const hasThumbprint = sign.thumbprint !== undefined
+
+	if (!hasFile && !hasThumbprint) {
+		throw new SEAError(
+			'SIGN',
+			'Windows signing requires exactly one of sign.file or sign.thumbprint',
+		)
+	}
+	if (hasFile && hasThumbprint) {
+		throw new SEAError(
+			'SIGN',
+			'Windows signing accepts only one of sign.file or sign.thumbprint, not both',
+		)
+	}
+
+	if (sign.timestamp !== undefined) {
+		let parsed: URL
+		try {
+			parsed = new URL(sign.timestamp)
+		} catch {
+			throw new SEAError('SIGN', 'Windows signing timestamp must be an http(s) URL', {
+				timestamp: sign.timestamp,
+			})
+		}
+		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+			throw new SEAError('SIGN', 'Windows signing timestamp must be an http(s) URL', {
+				timestamp: sign.timestamp,
+			})
+		}
+	}
+
+	const digest = sign.digest ?? 'sha256'
+	const supportedDigests = new Set(['sha1', 'sha256', 'sha384', 'sha512'])
+	if (!supportedDigests.has(digest)) {
+		throw new SEAError('SIGN', 'Unsupported signing digest', { digest: sign.digest })
+	}
+
+	return [
+		'signtool',
+		'sign',
+		'/fd',
+		digest,
+		...(sign.file !== undefined
+			? ['/f', sign.file, ...(sign.password !== undefined ? ['/p', sign.password] : [])]
+			: []),
+		...(sign.thumbprint !== undefined ? ['/sha1', sign.thumbprint] : []),
+		...(sign.timestamp !== undefined ? ['/tr', sign.timestamp, '/td', digest] : []),
+		target,
+	]
 }
 
 // === Formatting Helpers
@@ -487,13 +592,71 @@ export function ensureSafeName(name: string): void {
 }
 
 /**
+ * Fsync a directory to durably persist a prior file rename/create within it.
+ *
+ * @remarks
+ * A `rename`/`create` is only durable once its CONTAINING directory entry is
+ * flushed — fsyncing the file itself is not enough. `path` is the directory
+ * to fsync (callers pass `dirname(target)`, not the file itself). On Windows
+ * there is no directory file handle to fsync, so this is a no-op there (the
+ * platform lacks the primitive, not a failure). Some filesystems/platforms
+ * return a benign errno for a directory fsync attempt (`EINVAL`, `ENOTSUP`,
+ * `EISDIR`, `EPERM`, `EACCES`) — those are treated as "fsync unsupported
+ * here" and swallowed; anything else (e.g. `ENOENT`, meaning the directory
+ * itself is missing) is a genuine failure and is thrown as a coded `SEAError`.
+ *
+ * @param path - Directory path to fsync
+ * @throws SEAError with code `'OUTPUT'` when the directory sync fails for an
+ * unrecognized reason
+ *
+ * @example
+ * ```ts
+ * syncDirectory('/dist/app/bin')
+ * ```
+ */
+export function syncDirectory(path: string): void {
+	// Windows has no directory file handle to fsync — nothing to do there.
+	if (process.platform === 'win32') return
+
+	try {
+		const fd = openSync(path, 'r')
+		try {
+			fsyncSync(fd)
+		} finally {
+			closeSync(fd)
+		}
+	} catch (thrown: unknown) {
+		const code =
+			thrown instanceof Error && 'code' in thrown && typeof thrown.code === 'string'
+				? thrown.code
+				: undefined
+		// These codes mean "this filesystem/platform doesn't support directory
+		// fsync" — benign and safe to ignore. Anything else (e.g. ENOENT, the
+		// directory truly doesn't exist) is a genuine failure.
+		if (
+			code === 'EINVAL' ||
+			code === 'ENOTSUP' ||
+			code === 'EISDIR' ||
+			code === 'EPERM' ||
+			code === 'EACCES'
+		) {
+			return
+		}
+		const cause = thrown instanceof Error ? thrown.message : String(thrown)
+		throw new SEAError('OUTPUT', 'Failed to sync output directory', { path, cause })
+	}
+}
+
+/**
  * Finalize a built executable by durably flushing it to disk and atomically
  * moving it into place.
  *
  * @remarks
  * Opens `source` for read/write, `fsync`s it to force the OS to flush buffered
  * writes, closes it, then `rename`s it to `target`. Never deletes `target` on
- * failure — the caller retains whatever was previously there.
+ * failure — the caller retains whatever was previously there. After the file
+ * is already in place, the containing directory is fsynced ({@link syncDirectory})
+ * as a further durability step so the rename itself survives a crash.
  *
  * @param source - Absolute path to the built (temporary) executable
  * @param target - Absolute path to move the finalized executable to
@@ -517,6 +680,7 @@ export function finalizeExecutable(source: string, target: string): void {
 		const cause = thrown instanceof Error ? thrown.message : String(thrown)
 		throw new SEAError('OUTPUT', 'Failed to finalize executable', { source, target, cause })
 	}
+	syncDirectory(dirname(target))
 }
 
 /**

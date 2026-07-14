@@ -60,9 +60,10 @@ export class Injector implements InjectorInterface {
 	}
 
 	inject(): void {
+		let peOptionalOffset: number | undefined
 		switch (this.#format) {
 			case 'pe':
-				this.#injectPe()
+				peOptionalOffset = this.#injectPe()
 				break
 			case 'elf':
 				this.#injectElf()
@@ -74,6 +75,13 @@ export class Injector implements InjectorInterface {
 
 		if (this.#options.fuse !== undefined) {
 			patchSentinelFuse(this.#options.executable, this.#options.fuse)
+		}
+
+		// The checksum must be the TRUE last PE write — computed after the
+		// sentinel-fuse byte flip above — or an unsigned build ships a stale
+		// checksum that doesn't cover the fuse mutation.
+		if (peOptionalOffset !== undefined) {
+			this.#patchChecksum(peOptionalOffset)
 		}
 	}
 
@@ -114,7 +122,7 @@ export class Injector implements InjectorInterface {
 	//
 	// The blob data is streamed from disk — never held in memory.
 
-	#injectPe(): void {
+	#injectPe(): number {
 		const fd = openSync(this.#options.executable, 'r+')
 		try {
 			// --- Parse PE headers ---
@@ -377,6 +385,11 @@ export class Injector implements InjectorInterface {
 			if (writtenSize < alignedRawSize) {
 				appendFileSync(this.#options.executable, Buffer.alloc(alignedRawSize - writtenSize))
 			}
+
+			// The checksum is recomputed by the caller (inject()) AFTER the
+			// sentinel-fuse byte flip, so it covers every prior header/section
+			// change plus the fuse mutation. Return the offset for that call.
+			return optionalOffset
 		} catch (error: unknown) {
 			try {
 				closeSync(fd)
@@ -904,6 +917,54 @@ export class Injector implements InjectorInterface {
 					buf.writeUInt32LE((currentRva + sectionVa) >>> 0, offsetOrData)
 				}
 			}
+		}
+	}
+
+	// --- PE: recompute and write the OptionalHeader.CheckSum ---
+	//
+	// The classic Windows IMAGE checksum: sum the whole file as little-endian
+	// 16-bit words (the existing checksum's 4 bytes treated as zero), fold
+	// carries into a 16-bit accumulator, then add the file length. Streamed in
+	// chunks (like #appendFile) so a large SEA binary is never fully buffered.
+
+	#patchChecksum(optionalOffset: number): void {
+		const checksumOffset = optionalOffset + 64
+		const fd = openSync(this.#options.executable, 'r+')
+		try {
+			const fileSize = statSync(this.#options.executable).size
+			const chunkSize = 4 * 1024 * 1024
+			const chunk = Buffer.alloc(Math.min(chunkSize, fileSize))
+
+			let sum = 0
+			let offset = 0
+			while (offset < fileSize) {
+				const toRead = Math.min(chunkSize, fileSize - offset)
+				const bytesRead = readSync(fd, chunk, 0, toRead, offset)
+				if (bytesRead === 0) break
+
+				for (let i = 0; i < bytesRead; i += 2) {
+					const absolute = offset + i
+					let word: number
+					if (absolute === checksumOffset || absolute === checksumOffset + 2) {
+						word = 0
+					} else if (i + 1 < bytesRead) {
+						word = chunk.readUInt16LE(i)
+					} else {
+						word = chunk.readUInt8(i)
+					}
+					sum += word
+					sum = (sum & 0xffff) + (sum >>> 16)
+				}
+
+				offset += bytesRead
+			}
+
+			sum = (sum & 0xffff) + (sum >>> 16)
+			const checksum = (sum + fileSize) >>> 0
+
+			this.#writeU32(fd, checksumOffset, checksum)
+		} finally {
+			closeSync(fd)
 		}
 	}
 
