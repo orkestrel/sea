@@ -1,33 +1,15 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+// Real SEA build integration battery (AGENTS §16.1) — these tests copy the
+// real node binary and shell out to `node --experimental-sea-config`, which
+// is slow (~100MB copy + subprocess) and environment-dependent, so they are
+// kept OUT of the default `test` run and live in this dedicated, opt-in
+// `integration` project instead (run via `npm run test:integration`).
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createInjector, createSEA, isExecutableFormat } from '@src/server'
-import { createInjectorOptions, createSEAOptions, withTestDir } from '../../setupServer.js'
+import { createSEA, isSEAError, SEA } from '@src/server'
+import { createSEAOptions, withTestDir } from '../setupServer.js'
 
 describe('seal integration', () => {
-	it('createSEA creates an idle seal instance', () => {
-		const seal = createSEA(createSEAOptions())
-
-		expect(seal.status).toBe('idle')
-		seal.destroy()
-	})
-
-	it('createInjector detects the executable format of the current node binary', async () => {
-		await withTestDir({}, async (dir) => {
-			const blob = join(dir.root, 'blob.bin')
-			writeFileSync(blob, 'blob')
-
-			const injector = createInjector(
-				createInjectorOptions({
-					executable: process.execPath,
-					blob,
-				}),
-			)
-
-			expect(isExecutableFormat(injector.format)).toBe(true)
-		})
-	})
-
 	// Injects into the CURRENT node binary's real executable format. On some
 	// platforms/binaries the target has no free program-header slot for the
 	// injected segment (a genuine binary-layout limitation, not a test bug) —
@@ -124,6 +106,54 @@ describe('seal integration', () => {
 					useSnapshot: false,
 				})
 
+				seal.destroy()
+			},
+		)
+	}, 120000)
+
+	// Injects into the CURRENT node binary's real executable format. On some
+	// platforms/binaries the target has no free program-header slot for the
+	// injected segment (a genuine binary-layout limitation, not a test bug) —
+	// skip gracefully rather than fail when that specific condition occurs.
+	it('supports stage hooks through the on option', async (context) => {
+		await withTestDir(
+			{
+				'entry.cjs': "console.log('hello from seal')\n",
+			},
+			async (dir) => {
+				const events: string[] = []
+				const seal = new SEA(
+					createSEAOptions({
+						root: dir.root,
+						on: {
+							compress: () => {
+								events.push('compress')
+							},
+							blob: () => {
+								events.push('blob')
+							},
+							assemble: () => {
+								events.push('assemble')
+							},
+							complete: () => {
+								events.push('complete')
+							},
+						},
+					}),
+				)
+
+				try {
+					await seal.execute()
+				} catch (error) {
+					seal.destroy()
+					if (isSEAError(error) && error.code === 'INJECT') {
+						context.skip()
+						return
+					}
+					throw error
+				}
+
+				expect(events).toEqual(['compress', 'blob', 'assemble', 'complete'])
 				seal.destroy()
 			},
 		)

@@ -273,58 +273,9 @@ describe('SEA', () => {
 		)
 	})
 
-	// Injects into the CURRENT node binary's real executable format. On some
-	// platforms/binaries the target has no free program-header slot for the
-	// injected segment (a genuine binary-layout limitation, not a test bug) —
-	// skip gracefully rather than fail when that specific condition occurs.
-	it('supports stage hooks through the on option', async (context) => {
+	it('emits progress once per compressible file with an accurate running total', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
-			},
-			async (dir) => {
-				const events: string[] = []
-				const seal = new SEA(
-					createSEAOptions({
-						root: dir.root,
-						on: {
-							compress: () => {
-								events.push('compress')
-							},
-							blob: () => {
-								events.push('blob')
-							},
-							assemble: () => {
-								events.push('assemble')
-							},
-							complete: () => {
-								events.push('complete')
-							},
-						},
-					}),
-				)
-
-				try {
-					await seal.execute()
-				} catch (error) {
-					seal.destroy()
-					if (isSEAError(error) && error.code === 'INJECT') {
-						context.skip()
-						return
-					}
-					throw error
-				}
-
-				expect(events).toEqual(['compress', 'blob', 'assemble', 'complete'])
-				seal.destroy()
-			},
-		)
-	})
-
-	it('emits progress once per compressible file with an accurate running total', async (context) => {
-		await withTestDir(
-			{
-				'entry.cjs': "console.log('hello from seal')\n",
 				'assets/a.html': '<p>a</p>',
 				'assets/b.html': '<p>b</p>',
 				'assets/c.png': 'not-really-a-png',
@@ -334,6 +285,7 @@ describe('SEA', () => {
 				const seal = new SEA(
 					createSEAOptions({
 						root: dir.root,
+						entry: { path: 'missing-entry.cjs' },
 						compression: { paths: ['assets'] },
 						on: {
 							progress: (event) => {
@@ -343,16 +295,15 @@ describe('SEA', () => {
 					}),
 				)
 
-				try {
-					await seal.execute()
-				} catch (error) {
-					seal.destroy()
-					if (isSEAError(error) && error.code === 'INJECT') {
-						context.skip()
-						return
-					}
-					throw error
-				}
+				// #compress emits progress for every compressible file BEFORE #blob's
+				// ensureExists(entry) rejects with ENTRY — no real build, no node
+				// subprocess, no binary copy (AGENTS §16: fast + deterministic).
+				const error: unknown = await seal.execute().then(
+					() => undefined,
+					(thrown: unknown) => thrown,
+				)
+				expect(isSEAError(error)).toBe(true)
+				expect(isSEAError(error) && error.code).toBe('ENTRY')
 
 				// assets/c.png is skipped (SKIP_EXTENSIONS), so only a.html and b.html compress.
 				expect(progress).toHaveLength(2)

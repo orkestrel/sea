@@ -74,6 +74,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Run SEA integration tests
+        run: npm run test:integration
+
       - name: Write smoke scratch fixtures
         shell: bash
         run: |

@@ -62,9 +62,30 @@ export const guides = (config?: UserConfig): UserConfig =>
 		),
 	)
 
+// Standalone: the real-SEA-build integration battery. Extends the SAME node
+// server setup as srcServer (setupFiles/environment) but points at its own
+// `tests/integration/**` include — these tests copy the real node binary and
+// shell out to `node --experimental-sea-config`, which is slow and
+// environment-dependent, so they stay out of the default `test` run and are
+// opt-in via `npm run test:integration` (AGENTS §16.1).
+export const integration = (config?: UserConfig): UserConfig =>
+	mergeConfig(
+		{
+			resolve,
+			test: {
+				name: { label: 'integration', color: 'cyan' },
+				include: ['tests/integration/**/*.test.ts'],
+				setupFiles: ['./tests/setup.ts', './tests/setupServer.ts'],
+				environment: 'node',
+				browser: { enabled: false },
+			},
+		},
+		config ?? {},
+	)
+
 export default defineConfig({
 	resolve,
 	test: {
-		projects: [srcServer, guides],
+		projects: [srcServer, integration, guides],
 	},
 })
