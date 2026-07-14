@@ -94,15 +94,6 @@ export interface SEAPlatform {
 	readonly verify?: readonly string[]
 }
 
-/**
- * Windows PE subsystem identifier.
- *
- * @remarks
- * `console` — console subsystem (shows terminal window).
- * `gui`     — Windows GUI subsystem (no terminal window).
- */
-export type WindowsSubsystem = 'console' | 'gui'
-
 // === Shell
 
 /**
@@ -329,7 +320,7 @@ export type SEAEventMap = {
  * `output`      — directory for the final executable.
  * `assets`      — key→path mapping for SEA embedded assets.
  * `compression` — directories to Brotli-compress before embedding.
- * `windows`     — Windows-specific build options (PE subsystem).
+ * `windows`     — Windows-specific build options (console/GUI terminal).
  * `root`        — project root directory. Default: `process.cwd()`.
  * `signal`      — an `AbortSignal` that cancels the build in progress.
  * `blob`        — options controlling generated SEA blob behavior.
@@ -352,7 +343,12 @@ export interface SEAOptions {
  * Windows-specific SEA build options.
  *
  * @remarks
- * `subsystem` — Windows PE subsystem to patch onto the output executable.
+ * `terminal` — whether the built executable keeps a console window (PE
+ * console subsystem). Defaults to `true`. Set `false` to build a
+ * GUI-subsystem binary that launches without a terminal — warning: when
+ * launched without an attached console, a GUI-subsystem Node binary has no
+ * valid stdio, so `process.stdout`/`stderr`/`stdin` are detached and console
+ * output is discarded; use only for windowless apps.
  * `sign`      — Authenticode signing options. When present, the assembled
  * executable is signed with `signtool` (and verified) as the LAST content
  * mutation before the atomic finalize; when absent, the output is unsigned
@@ -362,7 +358,7 @@ export interface SEAOptions {
  * cross-compilation, so building on a non-Windows host ignores `windows.*`.
  */
 export interface SEAWindowsOptions {
-	readonly subsystem?: WindowsSubsystem
+	readonly terminal?: boolean
 	readonly sign?: SEAWindowsSignOptions
 }
 
@@ -403,7 +399,8 @@ export interface SEAWindowsSignOptions {
  * `compression` — compression manifest when directories were compressed.
  * `signed`      — whether the executable was code-signed.
  * `stripped`    — whether an existing signature was removed before signing.
- * `subsystem`   — the Windows PE subsystem patched onto the executable, if any.
+ * `terminal`    — `true` when a console window is retained, `false` for a
+ * GUI-subsystem build; `undefined` on non-Windows platforms.
  */
 export interface SEAResult {
 	readonly executable: string
@@ -413,7 +410,7 @@ export interface SEAResult {
 	readonly compression?: SEACompressionManifest
 	readonly signed: boolean
 	readonly stripped: boolean
-	readonly subsystem?: WindowsSubsystem
+	readonly terminal?: boolean
 }
 
 /**

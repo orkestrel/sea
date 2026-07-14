@@ -13,7 +13,7 @@ const sea = createSEA({
 	output: 'dist/sea',
 	assets: { 'model.gguf': 'models/model.gguf' },
 	compression: { paths: ['dist/app/browser'], mode: 'text' },
-	windows: { subsystem: 'gui' },
+	windows: { terminal: false },
 })
 
 const result = await sea.execute()
@@ -24,9 +24,11 @@ process.stdout.write(
 
 `sea.execute()` runs the three-step pipeline — compress assets, generate the blob, assemble and sign the executable — and transitions `sea.status` from `'idle'` to `'active'` to `'done'` (or `'error'`). `sea.emitter` reports progress on `compress`, `progress` (once per compressed file, with `current`/`total` counts), `blob`, `assemble`, and `complete`.
 
+On Windows, `SEAOptions.windows.terminal` (default `true`) selects whether the executable keeps its console window: `false` builds a GUI-subsystem binary that launches without a terminal, at the cost of detached stdio when no console is attached (console output is discarded).
+
 On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When present, the assembled executable is signed with `signtool` (cert `file` + `password`, or a store `thumbprint` — exactly one of the two) and verified as the LAST content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`), matching prior behavior exactly. `createSignCommand` builds the `signtool` argv and is available standalone.
 
-`SEAOptions.entry` is a `SEAEntryOptions` object (`{ path, format? }`) rather than a bare path — `format` selects the entry module format (`'cjs'` default, or `'esm'` on Node >= 25.7). Every domain failure throws a `SEAError` carrying a machine-readable `SEAErrorCode`; narrow a caught value with `isSEAError`. `SEAResult` additionally reports `signed`, `stripped`, and the patched `subsystem` (Windows only).
+`SEAOptions.entry` is a `SEAEntryOptions` object (`{ path, format? }`) rather than a bare path — `format` selects the entry module format (`'cjs'` default, or `'esm'` on Node >= 25.7). Every domain failure throws a `SEAError` carrying a machine-readable `SEAErrorCode`; narrow a caught value with `isSEAError`. `SEAResult` additionally reports `signed`, `stripped`, and the patched `terminal` flag (Windows only).
 
 ## Surface
 
@@ -133,7 +135,6 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `SEAProgressHandler`     | type      | Callback invoked by the framework after each file is compressed.             |
 | `SEACompressionOptions`  | interface | Options controlling Brotli compression of one or more directories.           |
 | `SEAPlatform`            | interface | Platform-specific SEA build configuration.                                   |
-| `WindowsSubsystem`       | type      | Windows PE subsystem identifier (`console` / `gui`).                         |
 | `SEAShellOptions`        | interface | Options for running a shell command.                                         |
 | `ExecutableFormat`       | type      | Executable binary format detected from file header magic bytes.              |
 | `InjectorOptions`        | interface | Options for injecting a resource into an executable.                         |
@@ -153,7 +154,7 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `SEAOptions`             | interface | Options for creating a SEA build.                                            |
 | `SEAWindowsOptions`      | interface | Windows-specific SEA build options.                                          |
 | `SEAWindowsSignOptions`  | interface | Windows Authenticode signing options, passed through to `signtool`.          |
-| `SEAResult`              | interface | Result of a successful seal build (adds `signed`, `stripped`, `subsystem`).  |
+| `SEAResult`              | interface | Result of a successful seal build (adds `signed`, `stripped`, `terminal`).   |
 | `SEAInterface`           | interface | SEA build orchestrator contract.                                             |
 
 ## Methods

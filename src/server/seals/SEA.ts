@@ -13,7 +13,6 @@ import type {
 	SEAOptions,
 	SEAResult,
 	SEAStatus,
-	WindowsSubsystem,
 } from '../types.js'
 import type { EmitterInterface } from '@orkestrel/emitter'
 import {
@@ -121,7 +120,7 @@ export class SEA implements SEAInterface {
 				compression,
 				signed: assembled.signed,
 				stripped: assembled.stripped,
-				subsystem: assembled.subsystem,
+				terminal: assembled.terminal,
 			}
 
 			this.#status = 'done'
@@ -266,7 +265,7 @@ export class SEA implements SEAInterface {
 	#assemble(
 		root: string,
 		blob: string,
-	): { executable: string; signed: boolean; stripped: boolean; subsystem?: WindowsSubsystem } {
+	): { executable: string; signed: boolean; stripped: boolean; terminal?: boolean } {
 		const platform = platformConfig()
 		if (platform === undefined) {
 			throw new SEAError('PLATFORM', `Unsupported platform: ${process.platform}`, {
@@ -282,7 +281,7 @@ export class SEA implements SEAInterface {
 
 		let signed = false
 		let stripped = false
-		let subsystem: WindowsSubsystem | undefined
+		let terminal: boolean | undefined
 
 		try {
 			if (process.platform === 'darwin') {
@@ -343,8 +342,8 @@ export class SEA implements SEAInterface {
 				stripped = true
 
 				if (isPEExecutable(temp)) {
-					subsystem = this.#options.windows?.subsystem === 'gui' ? 'gui' : 'console'
-					const value = subsystem === 'gui' ? WINDOWS_SUBSYSTEM_GUI : WINDOWS_SUBSYSTEM_CONSOLE
+					terminal = this.#options.windows?.terminal !== false
+					const value = terminal ? WINDOWS_SUBSYSTEM_CONSOLE : WINDOWS_SUBSYSTEM_GUI
 					patchPESubsystem(temp, value)
 				}
 
@@ -405,7 +404,7 @@ export class SEA implements SEAInterface {
 		}
 
 		this.#emitter.emit('assemble', finalOutput)
-		return { executable: finalOutput, signed, stripped, subsystem }
+		return { executable: finalOutput, signed, stripped, terminal }
 	}
 
 	#assets(root: string): Readonly<Record<string, string>> {

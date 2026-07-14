@@ -65,7 +65,7 @@ describe('seal integration', () => {
 				const platformExpectations: Readonly<Record<string, Partial<typeof result>>> = {
 					darwin: { signed: true, stripped: true },
 					linux: { signed: false, stripped: false },
-					win32: { stripped: true, signed: false, subsystem: 'console' },
+					win32: { stripped: true, signed: false, terminal: true },
 				}
 				expect(result).toMatchObject(platformExpectations[process.platform] ?? {})
 

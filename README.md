@@ -25,7 +25,7 @@ const sea = createSEA({
 		paths: ['dist/app/browser'],
 		mode: 'text',
 	},
-	windows: { subsystem: 'gui' },
+	windows: { terminal: false },
 	on: {
 		compress: (compression) => {
 			if (compression === undefined) return
@@ -54,7 +54,7 @@ process.stdout.write(
   chunks.
 - **Brotli asset compression** — directories are compressed before blob
   assembly, with `generic` / `text` / `font` modes.
-- **Hide the Windows terminal** — `windows: { subsystem: 'gui' }` patches the
+- **Hide the Windows terminal** — `windows: { terminal: false }` patches the
   PE subsystem field so a GUI application launches without a console window.
 - **Runtime asset access** — `AssetManager` loads assets embedded in the SEA
   blob via `node:sea`, or falls back to disk in development.
@@ -126,7 +126,7 @@ If you're coming from a manual `postject` injection script, `pkg`, or Node's
 built-in `--build-sea`, this package's edge is: a `postject`-free streaming
 injector with no file size ceiling, a fully programmatic surface (`createSEA`,
 typed events, `Result`-style errors), brotli asset compression, and the
-terminal-hiding (`windows.subsystem`) and SEA-sentinel-fuse patches that none
+terminal-hiding (`windows.terminal`) and SEA-sentinel-fuse patches that none
 of those flows provide out of the box.
 
 ## Troubleshooting
