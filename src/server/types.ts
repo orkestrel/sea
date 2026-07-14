@@ -22,18 +22,6 @@ export interface SEACompressionSize {
 export type SEACompressionMode = 'generic' | 'text' | 'font'
 
 /**
- * Input describing a single file to Brotli-compress.
- *
- * @remarks
- * `input`  — absolute path to the original file.
- * `output` — absolute path for the compressed output.
- */
-export interface SEACompressionInput {
-	readonly input: string
-	readonly output: string
-}
-
-/**
  * Result of compressing a single file.
  *
  * @remarks

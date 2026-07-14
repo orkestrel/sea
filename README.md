@@ -18,7 +18,7 @@ import { formatSize, createSEA } from '@orkestrel/sea'
 
 const sea = createSEA({
 	name: 'myapp',
-	entry: 'dist/server/serve.cjs',
+	entry: { path: 'dist/server/serve.cjs' },
 	output: 'dist/sea',
 	assets: { 'model.gguf': 'models/model.gguf' },
 	compression: {
@@ -155,7 +155,7 @@ import { createSEA } from '@orkestrel/sea'
 
 const sea = createSEA({
 	name: 'myapp',
-	entry: 'dist/server/serve.cjs',
+	entry: { path: 'dist/server/serve.cjs' },
 	output: 'dist/sea',
 	assets: { 'client.html': 'dist/app/client.html' },
 	on: {
@@ -175,7 +175,8 @@ import { AssetManager, openBrowser } from '@orkestrel/sea'
 
 const assets = new AssetManager()
 const server = createServer((_req, res) => {
-	res.end(assets.asset('client.html'))
+	const asset = assets.asset('client.html')
+	if (asset) res.end(Buffer.from(asset.content))
 })
 
 server.listen(0, () => {

@@ -125,7 +125,6 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | ------------------------ | --------- | ---------------------------------------------------------------------------- |
 | `SEACompressionSize`     | interface | Size comparison between original and compressed data.                        |
 | `SEACompressionMode`     | type      | Brotli compression mode (`generic` / `text` / `font`).                       |
-| `SEACompressionInput`    | interface | Input describing a single file to Brotli-compress.                           |
 | `SEACompressionResult`   | interface | Result of compressing a single file.                                         |
 | `SEACompressionManifest` | interface | Manifest summarizing all compressed assets.                                  |
 | `SEAProgress`            | interface | Progress reported while compressing a directory (`path`/`current`/`total`).  |
@@ -154,6 +153,41 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `SEAWindowsSignOptions`  | interface | Windows Authenticode signing options, passed through to `signtool`.          |
 | `SEAResult`              | interface | Result of a successful seal build (adds `signed`, `stripped`, `subsystem`).  |
 | `SEAInterface`           | interface | SEA build orchestrator contract.                                             |
+
+## Methods
+
+The public methods of each behavioral interface — every call-signature member listed (a `readonly` data member, e.g. `format` or `emitter`, stays a Surface row). Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface (AGENTS §22).
+
+#### `SEAInterface`
+
+`execute` runs the build pipeline; `destroy` is the §10 teardown.
+
+| Method    | Returns              | Behavior                                                                |
+| --------- | -------------------- | ----------------------------------------------------------------------- |
+| `execute` | `Promise<SEAResult>` | Run compress → blob → assemble and return the result (throws on error). |
+| `destroy` | `void`               | Tear down the emitter.                                                  |
+
+#### `InjectorInterface`
+
+`inject` performs the one-shot resource write.
+
+| Method   | Returns | Behavior                                             |
+| -------- | ------- | ---------------------------------------------------- |
+| `inject` | `void`  | Inject the resource data into the target executable. |
+
+#### `AssetManagerInterface`
+
+`asset` / `assets` are the §9.1 singular/plural accessors; `register` / `load` add assets; `clear` / `destroy` are the §10 lifecycle pair.
+
+| Method     | Returns                       | Behavior                                                     |
+| ---------- | ----------------------------- | ------------------------------------------------------------ |
+| `asset`    | `AssetInterface \| undefined` | Look up one registered asset by key.                         |
+| `assets`   | `readonly AssetInterface[]`   | List all registered assets, in registration order.           |
+| `keys`     | `readonly string[]`           | List all registered asset keys, in registration order.       |
+| `register` | `void`                        | Register one or more assets.                                 |
+| `load`     | `void`                        | Load client assets from disk (no-op inside SEA mode).        |
+| `clear`    | `void`                        | Remove all registered assets without destroying the manager. |
+| `destroy`  | `void`                        | Clear all assets and tear down the emitter.                  |
 
 ## Usage
 
@@ -189,6 +223,7 @@ manager.load() // disk fallback outside SEA mode; no-op inside SEA mode
 manager.asset('client.html.br')
 manager.assets()
 manager.keys()
+manager.clear()
 manager.destroy()
 ```
 
