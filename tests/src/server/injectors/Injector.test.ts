@@ -2,91 +2,21 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Injector, isSEAError, SEA_SENTINEL_FUSE } from '@src/server'
-import { createInjectorOptions, withTestDir } from '../../../setupServer.js'
+import {
+	buildElfFixture,
+	buildFatMachoFixture,
+	buildMachoFixture,
+	buildPeFixture,
+	createInjectorOptions,
+	findElfNotes,
+	findMachoSection,
+	parseElfProgramHeaders,
+	parseMachoLoadCommands,
+	parseMachoSegments,
+	parsePeResourceLeaves,
+	withTestDir,
+} from '../../../setupServer.js'
 import { captureError } from '../../../setup.js'
-
-// Local to this file only (Injector.test.ts owns this fixture; setupServer.ts
-// is off-limits in this dispatch) — a minimal but structurally valid PE32
-// image with one ".text" section and enough header slack for the injector to
-// append a new section header entry.
-function buildPeFixture(): Buffer {
-	const headerSize = 0x1a0
-	const fileAlignment = 0x200
-	const fileSize = 0x400
-	const buf = Buffer.alloc(fileSize)
-
-	// DOS header
-	buf.writeUInt16LE(0x5a4d, 0) // 'MZ'
-	buf.writeUInt32LE(0x80, 0x3c) // e_lfanew
-
-	const peOffset = 0x80
-	const coffOffset = peOffset + 4
-	const optionalOffset = coffOffset + 20
-	const sectionTableOffset = optionalOffset + 224
-
-	// PE signature
-	buf.writeUInt32LE(0x00004550, peOffset)
-
-	// COFF header
-	buf.writeUInt16LE(0x14c, coffOffset) // Machine
-	buf.writeUInt16LE(1, coffOffset + 2) // NumberOfSections
-	buf.writeUInt32LE(0, coffOffset + 4) // TimeDateStamp
-	buf.writeUInt32LE(0, coffOffset + 8) // PointerToSymbolTable
-	buf.writeUInt32LE(0, coffOffset + 12) // NumberOfSymbols
-	buf.writeUInt16LE(224, coffOffset + 16) // SizeOfOptionalHeader
-	buf.writeUInt16LE(0x0102, coffOffset + 18) // Characteristics
-
-	// Optional header (PE32)
-	buf.writeUInt16LE(0x10b, optionalOffset) // Magic
-	buf.writeUInt8(0, optionalOffset + 2) // MajorLinkerVersion
-	buf.writeUInt8(0, optionalOffset + 3) // MinorLinkerVersion
-	buf.writeUInt32LE(0, optionalOffset + 4) // SizeOfCode
-	buf.writeUInt32LE(0, optionalOffset + 8) // SizeOfInitializedData
-	buf.writeUInt32LE(0, optionalOffset + 12) // SizeOfUninitializedData
-	buf.writeUInt32LE(0x1000, optionalOffset + 16) // AddressOfEntryPoint
-	buf.writeUInt32LE(0x1000, optionalOffset + 20) // BaseOfCode
-	buf.writeUInt32LE(0, optionalOffset + 24) // BaseOfData
-	buf.writeUInt32LE(0x400000, optionalOffset + 28) // ImageBase
-	buf.writeUInt32LE(0x1000, optionalOffset + 32) // SectionAlignment
-	buf.writeUInt32LE(fileAlignment, optionalOffset + 36) // FileAlignment
-	buf.writeUInt16LE(6, optionalOffset + 40) // MajorOSVersion
-	buf.writeUInt16LE(0, optionalOffset + 42) // MinorOSVersion
-	buf.writeUInt16LE(0, optionalOffset + 44) // MajorImageVersion
-	buf.writeUInt16LE(0, optionalOffset + 46) // MinorImageVersion
-	buf.writeUInt16LE(6, optionalOffset + 48) // MajorSubsystemVersion
-	buf.writeUInt16LE(0, optionalOffset + 50) // MinorSubsystemVersion
-	buf.writeUInt32LE(0, optionalOffset + 52) // Win32VersionValue
-	buf.writeUInt32LE(0x2000, optionalOffset + 56) // SizeOfImage
-	buf.writeUInt32LE(fileAlignment, optionalOffset + 60) // SizeOfHeaders
-	buf.writeUInt32LE(0, optionalOffset + 64) // CheckSum (stale — recomputed by the injector)
-	buf.writeUInt16LE(3, optionalOffset + 68) // Subsystem
-	buf.writeUInt16LE(0, optionalOffset + 70) // DllCharacteristics
-	buf.writeUInt32LE(0x100000, optionalOffset + 72) // SizeOfStackReserve
-	buf.writeUInt32LE(0x1000, optionalOffset + 76) // SizeOfStackCommit
-	buf.writeUInt32LE(0x100000, optionalOffset + 80) // SizeOfHeapReserve
-	buf.writeUInt32LE(0x1000, optionalOffset + 84) // SizeOfHeapCommit
-	buf.writeUInt32LE(0, optionalOffset + 88) // LoaderFlags
-	buf.writeUInt32LE(16, optionalOffset + 92) // NumberOfRvaAndSizes
-	// DataDirectories[16] at optionalOffset + 96 are left zeroed (no resources)
-
-	// Section table: one ".text" section
-	buf.write('.text', sectionTableOffset, 8, 'ascii')
-	buf.writeUInt32LE(fileAlignment, sectionTableOffset + 8) // VirtualSize
-	buf.writeUInt32LE(0x1000, sectionTableOffset + 12) // VirtualAddress
-	buf.writeUInt32LE(fileAlignment, sectionTableOffset + 16) // SizeOfRawData
-	buf.writeUInt32LE(fileAlignment, sectionTableOffset + 20) // PointerToRawData
-	buf.writeUInt32LE(0, sectionTableOffset + 24) // PointerToRelocations
-	buf.writeUInt32LE(0, sectionTableOffset + 28) // PointerToLinenumbers
-	buf.writeUInt16LE(0, sectionTableOffset + 32) // NumberOfRelocations
-	buf.writeUInt16LE(0, sectionTableOffset + 34) // NumberOfLinenumbers
-	buf.writeUInt32LE(0x60000020, sectionTableOffset + 36) // Characteristics
-
-	if (sectionTableOffset + 40 !== headerSize) {
-		throw new Error('buildPeFixture: section table layout drifted from expected header size')
-	}
-
-	return buf
-}
 
 // Recomputes the classic Windows IMAGE checksum independently of the
 // injector's implementation, to assert against without testing a tautology.
@@ -110,186 +40,425 @@ function computePeChecksum(buf: Buffer, checksumOffset: number): number {
 }
 
 describe('Injector', () => {
-	it('detects PE executables', async () => {
-		await withTestDir({}, async (dir) => {
-			const executable = join(dir.root, 'test.exe')
-			const blob = join(dir.root, 'blob.bin')
-			const buffer = Buffer.alloc(0x44)
+	describe('detection', () => {
+		it('detects PE executables', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test.exe')
+				const blob = join(dir.root, 'blob.bin')
+				const buffer = Buffer.alloc(0x44)
 
-			buffer.writeUInt16LE(0x5a4d, 0)
-			buffer.writeUInt32LE(0x40, 0x3c)
-			buffer.writeUInt32LE(0x00004550, 0x40)
+				buffer.writeUInt16LE(0x5a4d, 0)
+				buffer.writeUInt32LE(0x40, 0x3c)
+				buffer.writeUInt32LE(0x00004550, 0x40)
 
-			writeFileSync(executable, buffer)
-			writeFileSync(blob, 'blob')
+				writeFileSync(executable, buffer)
+				writeFileSync(blob, 'blob')
 
-			const injector = new Injector(
-				createInjectorOptions({
-					executable,
-					blob,
-				}),
-			)
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
-			expect(injector.format).toBe('pe')
-		})
-	})
-
-	it('recomputes a valid PE checksum after injecting a resource', async () => {
-		await withTestDir({}, async (dir) => {
-			const executable = join(dir.root, 'test.exe')
-			const blob = join(dir.root, 'blob.bin')
-
-			writeFileSync(executable, buildPeFixture())
-			writeFileSync(blob, 'blob content')
-
-			const injector = new Injector(
-				createInjectorOptions({
-					executable,
-					blob,
-				}),
-			)
-
-			injector.inject()
-
-			const result = readFileSync(executable)
-			const peOffset = result.readUInt32LE(0x3c)
-			const optionalOffset = peOffset + 4 + 20
-			const checksumOffset = optionalOffset + 64
-			const storedChecksum = result.readUInt32LE(checksumOffset)
-
-			expect(storedChecksum).not.toBe(0)
-			expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
-		})
-	})
-
-	it('recomputes the PE checksum AFTER the sentinel-fuse flip, not before', async () => {
-		await withTestDir({}, async (dir) => {
-			const executable = join(dir.root, 'test.exe')
-			const blob = join(dir.root, 'blob.bin')
-
-			const fixture = buildPeFixture()
-			// Embed the sentinel fuse (unset: ':0') so inject() flips it to ':1' —
-			// this is the LAST PE mutation before the checksum must run, and
-			// proves the checksum covers it (would fail if computed too early).
-			const fuseBuf = Buffer.concat([Buffer.from(SEA_SENTINEL_FUSE, 'utf-8'), Buffer.from(':0')])
-			fuseBuf.copy(fixture, fixture.length - fuseBuf.length - 16)
-
-			writeFileSync(executable, fixture)
-			writeFileSync(blob, 'blob content')
-
-			const injector = new Injector(
-				createInjectorOptions({
-					executable,
-					blob,
-					fuse: SEA_SENTINEL_FUSE,
-				}),
-			)
-
-			injector.inject()
-
-			const result = readFileSync(executable)
-			const peOffset = result.readUInt32LE(0x3c)
-			const optionalOffset = peOffset + 4 + 20
-			const checksumOffset = optionalOffset + 64
-			const storedChecksum = result.readUInt32LE(checksumOffset)
-
-			// Confirm the fuse was actually flipped (sanity check the fixture).
-			const fuseIndex = result.indexOf(Buffer.from(SEA_SENTINEL_FUSE, 'utf-8'))
-			expect(fuseIndex).not.toBe(-1)
-			expect(
-				result
-					.subarray(fuseIndex + SEA_SENTINEL_FUSE.length, fuseIndex + SEA_SENTINEL_FUSE.length + 2)
-					.toString(),
-			).toBe(':1')
-
-			// Recompute the checksum independently over the FINAL file (fuse
-			// already flipped) — must match exactly, proving the checksum ran
-			// after the fuse mutation, not before.
-			expect(storedChecksum).not.toBe(0)
-			expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
-		})
-	})
-
-	it('detects ELF executables', async () => {
-		await withTestDir({}, async (dir) => {
-			const executable = join(dir.root, 'test')
-			const blob = join(dir.root, 'blob.bin')
-
-			writeFileSync(executable, Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
-			writeFileSync(blob, 'blob')
-
-			const injector = new Injector(
-				createInjectorOptions({
-					executable,
-					blob,
-				}),
-			)
-
-			expect(injector.format).toBe('elf')
-		})
-	})
-
-	it('detects Mach-O executables', async () => {
-		await withTestDir({}, async (dir) => {
-			const executable = join(dir.root, 'test')
-			const blob = join(dir.root, 'blob.bin')
-			const buffer = Buffer.alloc(4)
-
-			buffer.writeUInt32LE(0xfeedfacf, 0)
-
-			writeFileSync(executable, buffer)
-			writeFileSync(blob, 'blob')
-
-			const injector = new Injector(
-				createInjectorOptions({
-					executable,
-					blob,
-				}),
-			)
-
-			expect(injector.format).toBe('macho')
-		})
-	})
-
-	it('throws for unknown executable formats', async () => {
-		await withTestDir({}, async (dir) => {
-			const executable = join(dir.root, 'unknown.bin')
-			const blob = join(dir.root, 'blob.bin')
-
-			writeFileSync(executable, Buffer.from([0x00, 0x01, 0x02, 0x03]))
-			writeFileSync(blob, 'blob')
-
-			const error = captureError(() => {
-				return new Injector(
-					createInjectorOptions({
-						executable,
-						blob,
-					}),
-				)
+				expect(injector.format).toBe('pe')
 			})
+		})
 
-			expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+		it('detects ELF executables', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+				writeFileSync(blob, 'blob')
+
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
+
+				expect(injector.format).toBe('elf')
+			})
+		})
+
+		it('detects Mach-O executables', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test')
+				const blob = join(dir.root, 'blob.bin')
+				const buffer = Buffer.alloc(4)
+
+				buffer.writeUInt32LE(0xfeedfacf, 0)
+
+				writeFileSync(executable, buffer)
+				writeFileSync(blob, 'blob')
+
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
+
+				expect(injector.format).toBe('macho')
+			})
+		})
+
+		it('throws for unknown executable formats', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'unknown.bin')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, Buffer.from([0x00, 0x01, 0x02, 0x03]))
+				writeFileSync(blob, 'blob')
+
+				const error = captureError(() => {
+					return new Injector(createInjectorOptions({ executable, blob }))
+				})
+
+				expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+			})
+		})
+
+		it('throws for garbage binary content', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'garbage.bin')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00]))
+				writeFileSync(blob, 'blob')
+
+				const error = captureError(() => {
+					return new Injector(createInjectorOptions({ executable, blob }))
+				})
+
+				expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+			})
 		})
 	})
 
-	it('throws for garbage binary content', async () => {
-		await withTestDir({}, async (dir) => {
-			const executable = join(dir.root, 'garbage.bin')
-			const blob = join(dir.root, 'blob.bin')
+	describe('ELF injection', () => {
+		it('injects a PT_NOTE that is reachable via a mapped PT_LOAD (memory-residency invariant)', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test')
+				const blob = join(dir.root, 'blob.bin')
+				const blobContent = 'sea blob payload for elf note injection'
 
-			writeFileSync(executable, Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00]))
-			writeFileSync(blob, 'blob')
+				writeFileSync(executable, buildElfFixture())
+				writeFileSync(blob, blobContent)
 
-			const error = captureError(() => {
-				return new Injector(
-					createInjectorOptions({
-						executable,
-						blob,
-					}),
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
+
+				expect(() => injector.inject()).not.toThrow()
+
+				const result = readFileSync(executable)
+				const headers = parseElfProgramHeaders(result)
+				const notes = findElfNotes(result, 'NODE_SEA')
+
+				expect(notes).toHaveLength(1)
+				const note = notes[0]
+				expect(note).toBeDefined()
+				if (note === undefined) return
+
+				expect(note.descsz).toBe(blobContent.length)
+				expect(note.descriptor.subarray(0, blobContent.length).toString('utf-8')).toBe(blobContent)
+
+				const covering = headers.find(
+					(load) =>
+						load.type === 1 &&
+						note.header.offset >= load.offset &&
+						note.header.offset < load.offset + load.filesz,
 				)
-			})
+				expect(covering).toBeDefined()
+				if (covering === undefined) return
 
-			expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+				expect(note.header.vaddr).toBe(covering.vaddr + (note.header.offset - covering.offset))
+
+				const originalPhnum = 3
+				const newPhnum = result.readUInt16LE(56)
+				expect(newPhnum).toBeGreaterThan(originalPhnum)
+			})
+		})
+
+		it('leaves exactly one active NODE_SEA PT_NOTE when injected twice (overwrite)', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, buildElfFixture())
+				writeFileSync(blob, 'first blob content')
+
+				new Injector(createInjectorOptions({ executable, blob })).inject()
+
+				writeFileSync(blob, 'second, different blob content')
+				new Injector(createInjectorOptions({ executable, blob })).inject()
+
+				const result = readFileSync(executable)
+				const notes = findElfNotes(result, 'NODE_SEA')
+
+				expect(notes).toHaveLength(1)
+				const note = notes[0]
+				expect(
+					note?.descriptor.subarray(0, 'second, different blob content'.length).toString(),
+				).toBe('second, different blob content')
+			})
+		})
+	})
+
+	describe('Mach-O injection', () => {
+		it('injects a NODE_SEA segment placed immediately before a relocated __LINKEDIT ending at EOF', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test')
+				const blob = join(dir.root, 'blob.bin')
+				const blobContent = 'sea blob payload for macho segment injection'
+
+				writeFileSync(executable, buildMachoFixture())
+				writeFileSync(blob, blobContent)
+
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
+
+				expect(() => injector.inject()).not.toThrow()
+
+				const result = readFileSync(executable)
+				const segments = parseMachoSegments(result)
+				const fileLength = result.length
+
+				const linkedit = segments.find((s) => s.name === '__LINKEDIT')
+				expect(linkedit).toBeDefined()
+				if (linkedit === undefined) return
+
+				// __LINKEDIT is the last segment by fileoff and ends at EOF
+				const lastByFileoff = [...segments].sort((a, b) => b.fileoff - a.fileoff)[0]
+				expect(lastByFileoff?.name).toBe('__LINKEDIT')
+				expect(linkedit.fileoff + linkedit.filesize).toBe(fileLength)
+
+				const nodeSea = segments.find((s) => s.name === 'NODE_SEA')
+				expect(nodeSea).toBeDefined()
+				if (nodeSea === undefined) return
+
+				expect(nodeSea.fileoff + nodeSea.filesize).toBe(linkedit.fileoff)
+
+				const section = findMachoSection(result, 'NODE_SEA', '__NODE_SEA_BLOB')
+				expect(section).toBeDefined()
+				if (section === undefined) return
+
+				expect(section.size).toBe(BigInt(blobContent.length))
+				expect(
+					section.addr >= nodeSea.vmaddr && section.addr < nodeSea.vmaddr + nodeSea.vmsize,
+				).toBe(true)
+
+				const blobBytes = result.subarray(section.offset, section.offset + blobContent.length)
+				expect(blobBytes.toString('utf-8')).toBe(blobContent)
+
+				// LC_SYMTAB/LC_DYSYMTAB offsets shifted by `shift`, and ncmds/sizeofcmds updated
+				const original = buildMachoFixture()
+				const originalNcmds = original.readUInt32LE(16)
+				const originalSizeofcmds = original.readUInt32LE(20)
+				const newNcmds = result.readUInt32LE(16)
+				const newSizeofcmds = result.readUInt32LE(20)
+				expect(newNcmds).toBe(originalNcmds + 1) // one new NODE_SEA segment command added
+				expect(newSizeofcmds).toBeGreaterThan(originalSizeofcmds)
+
+				const shift = nodeSea.filesize
+				expect(shift).toBeGreaterThan(0)
+
+				// The NODE_SEA segment command must precede __LINKEDIT's segment
+				// command in the rebuilt load-command list, keeping segments in
+				// ascending vmaddr order with __LINKEDIT textually last.
+				const loadCommands = parseMachoLoadCommands(result)
+				const nodeSeaCmdIndex = loadCommands.findIndex((c) => c.offset === nodeSea.offset)
+				const linkeditCmdIndex = loadCommands.findIndex((c) => c.offset === linkedit.offset)
+				expect(nodeSeaCmdIndex).toBeGreaterThanOrEqual(0)
+				expect(linkeditCmdIndex).toBeGreaterThanOrEqual(0)
+				expect(nodeSeaCmdIndex).toBeLessThan(linkeditCmdIndex)
+			})
+		})
+
+		it('leaves exactly one NODE_SEA segment when injected twice (overwrite)', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, buildMachoFixture())
+				writeFileSync(blob, 'first payload')
+
+				new Injector(createInjectorOptions({ executable, blob })).inject()
+
+				writeFileSync(blob, 'second, different payload content')
+				new Injector(createInjectorOptions({ executable, blob })).inject()
+
+				const result = readFileSync(executable)
+				const nodeSeaSegments = parseMachoSegments(result).filter((s) => s.name === 'NODE_SEA')
+
+				expect(nodeSeaSegments).toHaveLength(1)
+
+				const section = findMachoSection(result, 'NODE_SEA', '__NODE_SEA_BLOB')
+				expect(section?.size).toBe(BigInt('second, different payload content'.length))
+			})
+		})
+
+		it('throws INJECT when there is not enough header space for the new load command', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, buildMachoFixture({ tightHeaders: true }))
+				writeFileSync(blob, 'blob content')
+
+				const error = captureError(() => {
+					new Injector(createInjectorOptions({ executable, blob })).inject()
+				})
+
+				expect(isSEAError(error) && error.code === 'INJECT').toBe(true)
+			})
+		})
+
+		it('rejects a fat/universal Mach-O with a coded FORMAT error', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'fat.bin')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, buildFatMachoFixture())
+				writeFileSync(blob, 'blob')
+
+				const error = captureError(() => {
+					return new Injector(createInjectorOptions({ executable, blob }))
+				})
+
+				expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+			})
+		})
+	})
+
+	describe('PE injection', () => {
+		it('recomputes a valid PE checksum after injecting a resource', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test.exe')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, buildPeFixture())
+				writeFileSync(blob, 'blob content')
+
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
+
+				injector.inject()
+
+				const result = readFileSync(executable)
+				const peOffset = result.readUInt32LE(0x3c)
+				const optionalOffset = peOffset + 4 + 20
+				const checksumOffset = optionalOffset + 64
+				const storedChecksum = result.readUInt32LE(checksumOffset)
+
+				expect(storedChecksum).not.toBe(0)
+				expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
+			})
+		})
+
+		it('recomputes the PE checksum AFTER the sentinel-fuse flip, not before', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test.exe')
+				const blob = join(dir.root, 'blob.bin')
+
+				const fixture = buildPeFixture()
+				// Embed the sentinel fuse (unset: ':0') so inject() flips it to ':1' —
+				// this is the LAST PE mutation before the checksum must run, and
+				// proves the checksum covers it (would fail if computed too early).
+				const fuseBuf = Buffer.concat([Buffer.from(SEA_SENTINEL_FUSE, 'utf-8'), Buffer.from(':0')])
+				fuseBuf.copy(fixture, fixture.length - fuseBuf.length - 16)
+
+				writeFileSync(executable, fixture)
+				writeFileSync(blob, 'blob content')
+
+				const injector = new Injector(
+					createInjectorOptions({ executable, blob, fuse: SEA_SENTINEL_FUSE }),
+				)
+
+				injector.inject()
+
+				const result = readFileSync(executable)
+				const peOffset = result.readUInt32LE(0x3c)
+				const optionalOffset = peOffset + 4 + 20
+				const checksumOffset = optionalOffset + 64
+				const storedChecksum = result.readUInt32LE(checksumOffset)
+
+				// Confirm the fuse was actually flipped (sanity check the fixture).
+				const fuseIndex = result.indexOf(Buffer.from(SEA_SENTINEL_FUSE, 'utf-8'))
+				expect(fuseIndex).not.toBe(-1)
+				expect(
+					result
+						.subarray(
+							fuseIndex + SEA_SENTINEL_FUSE.length,
+							fuseIndex + SEA_SENTINEL_FUSE.length + 2,
+						)
+						.toString(),
+				).toBe(':1')
+
+				// Recompute the checksum independently over the FINAL file (fuse
+				// already flipped) — must match exactly, proving the checksum ran
+				// after the fuse mutation, not before.
+				expect(storedChecksum).not.toBe(0)
+				expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
+			})
+		})
+
+		it('injects into a PE32+ (64-bit) image successfully', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test.exe')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, buildPeFixture({ plus: true }))
+				writeFileSync(blob, 'blob content for pe32plus')
+
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
+
+				expect(() => injector.inject()).not.toThrow()
+
+				const result = readFileSync(executable)
+				const leaves = parsePeResourceLeaves(result, '.rsrc2')
+				const blobLeaf = leaves.find((l) => l.nameName?.toUpperCase() === 'NODE_SEA_BLOB')
+
+				expect(blobLeaf).toBeDefined()
+				expect(blobLeaf?.data.length).toBe('blob content for pe32plus'.length)
+
+				const peOffset = result.readUInt32LE(0x3c)
+				const optionalOffset = peOffset + 4 + 20
+				const checksumOffset = optionalOffset + 64
+				const storedChecksum = result.readUInt32LE(checksumOffset)
+				expect(storedChecksum).not.toBe(0)
+				expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
+			})
+		})
+
+		it('preserves an existing resource leaf while adding the blob leaf', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test.exe')
+				const blob = join(dir.root, 'blob.bin')
+
+				writeFileSync(executable, buildPeFixture({ resources: true }))
+				writeFileSync(blob, 'the injected blob')
+
+				const injector = new Injector(createInjectorOptions({ executable, blob }))
+				injector.inject()
+
+				const result = readFileSync(executable)
+				const leaves = parsePeResourceLeaves(result, '.rsrc2')
+
+				const existingLeaf = leaves.find((l) => l.nameName === 'EXISTING')
+				expect(existingLeaf).toBeDefined()
+				expect(existingLeaf?.data.toString('ascii')).toBe('EXISTDAT')
+
+				const blobLeaf = leaves.find((l) => l.nameName?.toUpperCase() === 'NODE_SEA_BLOB')
+				expect(blobLeaf).toBeDefined()
+				expect(blobLeaf?.data.length).toBe('the injected blob'.length)
+			})
+		})
+
+		it('throws FORMAT for malformed (non-power-of-two) PE alignment', async () => {
+			await withTestDir({}, async (dir) => {
+				const executable = join(dir.root, 'test.exe')
+				const blob = join(dir.root, 'blob.bin')
+
+				const fixture = buildPeFixture()
+				const peOffset = fixture.readUInt32LE(0x3c)
+				const optionalOffset = peOffset + 4 + 20
+				fixture.writeUInt32LE(0, optionalOffset + 36) // FileAlignment = 0
+
+				writeFileSync(executable, fixture)
+				writeFileSync(blob, 'blob content')
+
+				const error = captureError(() => {
+					new Injector(createInjectorOptions({ executable, blob })).inject()
+				})
+
+				expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+			})
 		})
 	})
 })

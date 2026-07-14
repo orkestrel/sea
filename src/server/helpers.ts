@@ -797,10 +797,10 @@ export function createBlobConfig(
  *
  * @example
  * ```ts
- * const { header, entryTotal } = buildElfNoteHeader('NODE_SEA_BLOB', 4096)
+ * const { header, entryTotal } = buildELFNoteHeader('NODE_SEA_BLOB', 4096)
  * ```
  */
-export function buildElfNoteHeader(
+export function buildELFNoteHeader(
 	resource: string,
 	blobSize: number,
 ): { readonly header: Buffer; readonly entryTotal: number } {

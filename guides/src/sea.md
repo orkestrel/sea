@@ -113,6 +113,7 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `syncDirectory`       | function | Fsync a directory to durably persist a prior file rename/create within it.      |
 | `createBlobConfig`    | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
 | `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                          |
+| `buildELFNoteHeader`  | function | Build an ELF `PT_NOTE` entry's header bytes for the SEA blob note.              |
 | `openBrowser`         | function | Launch the system default browser at an http(s) URL.                            |
 | `SEAError`            | class    | The coded base error for every failure raised by the seal build.                |
 | `isSEAError`          | function | Whether a value is a `SEAError`.                                                |

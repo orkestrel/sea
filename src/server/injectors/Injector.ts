@@ -41,7 +41,7 @@ import {
 	MACHO_MAGIC_64,
 	MACHO_LC_SEGMENT_64,
 } from '../constants.js'
-import { patchSentinelFuse, buildElfNoteHeader } from '../helpers.js'
+import { patchSentinelFuse, buildELFNoteHeader } from '../helpers.js'
 import { SEAError } from '../errors.js'
 
 // === Injector
@@ -99,6 +99,30 @@ export class Injector implements InjectorInterface {
 			if (magic16 === PE_MAGIC) return 'pe'
 			if (magic32 === ELF_MAGIC) return 'elf'
 			if (magic32le === MACHO_MAGIC_64) return 'macho'
+
+			// Fat/universal Mach-O (either byte order) — dedicated message so
+			// callers know exactly why: this injector only handles thin binaries.
+			if (magic32 === 0xcafebabe || magic32 === 0xbebafeca) {
+				throw new SEAError(
+					'FORMAT',
+					'Mach-O universal/fat binaries are not supported; provide a thin arm64 or x86_64 binary',
+					{ executable: this.#options.executable, magic: magic32 },
+				)
+			}
+
+			// 32-bit or big-endian thin Mach-O (magic 0xfeedface / 0xcefaedfe) —
+			// only 64-bit little-endian Mach-O (0xfeedfacf) is supported.
+			if (
+				magic32le === 0xfeedface ||
+				magic32le === 0xcefaedfe ||
+				magic32 === 0xfeedface ||
+				magic32 === 0xcefaedfe
+			) {
+				throw new SEAError('FORMAT', 'Only 64-bit little-endian Mach-O is supported', {
+					executable: this.#options.executable,
+					magic: magic32,
+				})
+			}
 
 			throw new SEAError(
 				'FORMAT',
@@ -1088,7 +1112,7 @@ export class Injector implements InjectorInterface {
 		const regionVaddr = this.#align(maxVaddrEnd, PAGE)
 
 		const blobSize = statSync(this.#options.blob).size
-		const { header: noteHeader, entryTotal: noteEntryTotal } = buildElfNoteHeader(
+		const { header: noteHeader, entryTotal: noteEntryTotal } = buildELFNoteHeader(
 			resource,
 			blobSize,
 		)
@@ -1125,7 +1149,12 @@ export class Injector implements InjectorInterface {
 
 		// Relocate PT_PHDR (if present) to point at the enlarged table, which
 		// itself lives inside the new PT_LOAD right after the note — keeping
-		// PT_PHDR's p_vaddr congruent with its covering segment.
+		// PT_PHDR's p_vaddr congruent with its covering segment. This relies on
+		// a modern-kernel loader that computes AT_PHDR from the PT_LOAD
+		// covering e_phoff (Linux ~5.x+ / the Node>=24 target); a pre-5.x
+		// kernel that instead computes AT_PHDR = load_addr + e_phoff would
+		// derive a wrong value here since the PHT no longer sits at its
+		// original load-relative offset.
 		const finalHeaders = headers.map((header) => {
 			if (header.type !== PT_PHDR) return header
 			const relVaddr = regionVaddr + (phtOff - regionStart)
@@ -1492,9 +1521,15 @@ export class Injector implements InjectorInterface {
 			if (existingSegmentIndices.includes(i)) continue
 			const c = commands[i]
 			if (c === undefined) continue
+			// Insert the new NODE_SEA segment command immediately before
+			// __LINKEDIT so segment commands stay in ascending vmaddr order and
+			// __LINKEDIT remains the textually-last segment, as dyld/codesign
+			// require.
+			if (i === linkeditIndex) {
+				pieces.push(cmd)
+			}
 			pieces.push(Buffer.from(buf.subarray(c.offset, c.offset + c.size)))
 		}
-		pieces.push(cmd)
 		const newLoadCmdsBuf = Buffer.concat(pieces)
 		if (newLoadCmdsBuf.length !== newSizeofcmds) {
 			throw new SEAError('INJECT', 'Internal Mach-O load command size mismatch', {
@@ -1504,10 +1539,18 @@ export class Injector implements InjectorInterface {
 
 		// --- Rewrite the file: header+LCs, unchanged body up to Loff, the
 		// blob (streamed, padded to `shift`), then the relocated __LINKEDIT. ---
+		// The unchanged body is sliced starting from the NEW command-region end
+		// (not the old sizeofcmds) — the ceiling check above guarantees
+		// [headerSize + sizeofcmds, headerSize + newSizeofcmds) lies entirely in
+		// inter-command padding, so discarding those bytes absorbs the growth
+		// and keeps every recorded section/segment offset (computed assuming no
+		// shift) correct. Slicing from the OLD sizeofcmds instead would shift
+		// the entire __TEXT/__DATA body forward by the growth delta, corrupting
+		// every offset already written into the new load commands.
 		const prefix = Buffer.concat([
 			buf.subarray(0, headerSize),
 			newLoadCmdsBuf,
-			buf.subarray(headerSize + sizeofcmds, Loff),
+			buf.subarray(headerSize + newSizeofcmds, Loff),
 		])
 		writeFileSync(exePath, prefix)
 
@@ -1570,6 +1613,9 @@ export class Injector implements InjectorInterface {
 				bump(base + 8) // dataoff (linkedit_data_command)
 				break
 			default:
+				// LC_TWOLEVEL_HINTS (0x16, offset@+8) and LC_ATOM_INFO also
+				// point into __LINKEDIT but are intentionally not handled here
+				// because they do not appear in Node.js executables.
 				break
 		}
 	}
