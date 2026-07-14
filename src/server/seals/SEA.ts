@@ -161,7 +161,12 @@ export class SEA implements SEAInterface {
 
 		for (const path of this.#options.compression?.paths ?? []) {
 			ensureSafeKey(path)
-			ensureContained(base, path)
+			// A compression path that does not exist yet is skipped by #compress
+			// (existsSync gate below), so validation only enforces containment
+			// for paths that actually exist — keep the two stages in agreement.
+			if (existsSync(resolve(base, path))) {
+				ensureContained(base, path)
+			}
 		}
 
 		const sign = this.#options.windows?.sign

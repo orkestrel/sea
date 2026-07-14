@@ -19,7 +19,8 @@ import type {
 import type { EmitterInterface } from '@orkestrel/emitter'
 import { Emitter } from '@orkestrel/emitter'
 import { isArrayBuffer } from '@orkestrel/contract'
-import { BROTLI_EXTENSION, CLIENT_ASSET_KEY_BR, CLIENT_ASSET_KEY_RAW } from '../constants.js'
+import { CLIENT_ASSET_KEY_BR, CLIENT_ASSET_KEY_RAW } from '../constants.js'
+import { Asset } from './Asset.js'
 
 // === AssetManager
 
@@ -58,11 +59,7 @@ export class AssetManager implements AssetManagerInterface {
 	register(input: AssetInput | AssetInput[]): void {
 		const items = Array.isArray(input) ? input : [input]
 		for (const item of items) {
-			const asset: AssetInterface = {
-				key: item.key,
-				content: item.content,
-				compressed: item.compressed ?? item.key.endsWith(BROTLI_EXTENSION),
-			}
+			const asset: AssetInterface = new Asset(item)
 			this.#add(asset)
 			this.#emitter.emit('register', asset)
 		}
@@ -136,11 +133,7 @@ export class AssetManager implements AssetManagerInterface {
 			const registered: string[] = []
 			for (const key of assetKeys) {
 				const content: ArrayBuffer = getRawAsset(key)
-				this.#add({
-					key,
-					content,
-					compressed: key.endsWith(BROTLI_EXTENSION),
-				})
+				this.#add(new Asset({ key, content }))
 				registered.push(key)
 			}
 			if (registered.length > 0) {
