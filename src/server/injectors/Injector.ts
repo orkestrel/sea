@@ -41,7 +41,7 @@ import {
 	MACHO_MAGIC_64,
 	MACHO_LC_SEGMENT_64,
 } from '../constants.js'
-import { patchSentinelFuse } from '../helpers.js'
+import { patchSentinelFuse, buildElfNoteHeader } from '../helpers.js'
 import { SEAError } from '../errors.js'
 
 // === Injector
@@ -152,6 +152,7 @@ export class Injector implements InjectorInterface {
 
 			const sectionAlignment = this.#readU32(fd, optionalOffset + 32)
 			const fileAlignment = this.#readU32(fd, optionalOffset + 36)
+			this.#ensureValidPEAlignment(sectionAlignment, fileAlignment)
 
 			// SizeOfImage offset: same in PE32 and PE32+
 			const sizeOfImageOffset = optionalOffset + 56
@@ -850,7 +851,14 @@ export class Injector implements InjectorInterface {
 						// Blob
 						dataOffset = headerSize + blobDataOffset
 					} else {
-						dataOffset = headerSize + (leafFileOffsets.get(entry.leafIndex) ?? 0)
+						const resolvedOffset = leafFileOffsets.get(entry.leafIndex)
+						if (resolvedOffset === undefined) {
+							throw new SEAError('INJECT', 'unresolvable resource RVA', {
+								executable: this.#options.executable,
+								leafIndex: entry.leafIndex,
+							})
+						}
+						dataOffset = headerSize + resolvedOffset
 					}
 
 					// Store as relative offset from section start for now;
@@ -998,8 +1006,29 @@ export class Injector implements InjectorInterface {
 
 	#injectElf(): void {
 		const exePath = this.#options.executable
-		const fd = openSync(exePath, 'r+')
+		const resource = this.#options.resource
+		const overwrite = this.#options.overwrite !== false
 
+		const PT_LOAD = 1
+		const PT_PHDR = 6
+		const PF_R = 4
+		const PAGE = 0x1000
+
+		let phdrOffset: number
+		let phdrEntrySize: number
+		let phdrCount: number
+		let headers: Array<{
+			type: number
+			flags: number
+			offset: number
+			vaddr: number
+			paddr: number
+			filesz: number
+			memsz: number
+			align: number
+		}>
+
+		const fd = openSync(exePath, 'r')
 		try {
 			// --- Parse ELF header ---
 			const identBuf = Buffer.alloc(16)
@@ -1010,153 +1039,262 @@ export class Injector implements InjectorInterface {
 
 			if (elfClass !== ELF_CLASS_64) {
 				throw new SEAError('FORMAT', 'Only 64-bit ELF executables are supported', {
-					executable: this.#options.executable,
+					executable: exePath,
 					elfClass,
 				})
 			}
 			if (elfData !== ELF_DATA_LSB) {
 				throw new SEAError('FORMAT', 'Only little-endian ELF executables are supported', {
-					executable: this.#options.executable,
+					executable: exePath,
 					elfData,
 				})
 			}
 
-			// ELF64 header fields
-			const phdrOffset = this.#readU64(fd, 32) // e_phoff
-			const phdrEntrySize = this.#readU16(fd, 54) // e_phentsize
-			const phdrCount = this.#readU16(fd, 56) // e_phnum
+			phdrOffset = Number(this.#readU64(fd, 32)) // e_phoff
+			phdrEntrySize = this.#readU16(fd, 54) // e_phentsize
+			phdrCount = this.#readU16(fd, 56) // e_phnum
 
-			// --- Find an existing PT_NOTE or free slot ---
-			// We look for an existing PT_NOTE whose note name matches (for overwrite)
-			// or we use a NULL (type 0) entry as a free slot for a new PT_NOTE.
-			let targetPhdrOffset = -1
+			headers = this.#readElfProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
 
-			for (let i = 0; i < phdrCount; i++) {
-				const off = Number(phdrOffset) + i * phdrEntrySize
-				const pType = this.#readU32(fd, off)
-
-				if (pType === ELF_PT_NOTE) {
-					// Check if this note matches our resource name
-					const noteOffset = Number(this.#readU64(fd, off + 8)) // p_offset
-					const noteSize = Number(this.#readU64(fd, off + 32)) // p_filesz
-					if (this.#elfNoteContains(fd, noteOffset, noteSize, this.#options.resource)) {
-						if (this.#options.overwrite !== false) {
-							targetPhdrOffset = off
-							break
-						}
-						throw new SEAError(
-							'INJECT',
-							`Note with name "${this.#options.resource}" already exists`,
-							{ executable: this.#options.executable, resource: this.#options.resource },
-						)
-					}
+			// Neutralize any stale PT_NOTE with a matching name so overwrite
+			// never leaves two competing "NODE_SEA*" notes visible to
+			// postject_find_resource — runtime skips any non-PT_NOTE entry.
+			for (const header of headers) {
+				if (header.type !== ELF_PT_NOTE) continue
+				const existingName = this.#readElfNoteName(fd, header.offset, header.filesz)
+				if (existingName === undefined || !existingName.startsWith('NODE_SEA')) continue
+				if (!overwrite) {
+					throw new SEAError('INJECT', `Note with name "${resource}" already exists`, {
+						executable: exePath,
+						resource,
+					})
 				}
-
-				// Use a PT_NULL (type 0) entry as a free slot
-				if (pType === 0 && targetPhdrOffset === -1) {
-					targetPhdrOffset = off
-				}
+				header.type = 0 // PT_NULL
 			}
-
-			if (targetPhdrOffset === -1) {
-				throw new SEAError(
-					'INJECT',
-					'No free program header entry (PT_NULL) available for a new PT_NOTE segment',
-					{ executable: this.#options.executable, programHeaderCount: phdrCount },
-				)
-			}
-
-			// --- Build the note ---
-			const nameBytes = Buffer.from(this.#options.resource + '\0', 'utf-8')
-			const nameSize = nameBytes.length
-			const alignedNameSize = this.#align(nameSize, 4)
-
-			const blobSize = statSync(this.#options.blob).size
-			const alignedDescSize = this.#align(blobSize, 4)
-
-			// Note header: namesz (4) + descsz (4) + type (4) = 12
-			const noteHeaderSize = 12
-			const noteHeader = Buffer.alloc(noteHeaderSize + alignedNameSize)
-			noteHeader.writeUInt32LE(nameSize, 0)
-			noteHeader.writeUInt32LE(blobSize, 4)
-			noteHeader.writeUInt32LE(0, 8) // type: 0 (generic)
-			nameBytes.copy(noteHeader, noteHeaderSize)
-
-			// --- Append to file ---
+		} finally {
 			closeSync(fd)
+		}
 
-			const fileSize = statSync(exePath).size
-			const noteFileOffset = this.#align(fileSize, 8)
+		// --- Compute the new PT_LOAD/PT_NOTE placement ---
+		// The note MUST live inside a PT_LOAD so the runtime's dl_iterate_phdr
+		// walk can read it from the mapped virtual address (Node reads
+		// NODE_SEA notes from memory, never from the file).
+		let maxVaddrEnd = 0
+		for (const header of headers) {
+			if (header.type !== PT_LOAD) continue
+			const end = header.vaddr + header.memsz
+			if (end > maxVaddrEnd) maxVaddrEnd = end
+		}
+		const regionVaddr = this.#align(maxVaddrEnd, PAGE)
 
-			// Pad to alignment
-			if (noteFileOffset > fileSize) {
-				appendFileSync(exePath, Buffer.alloc(noteFileOffset - fileSize))
+		const blobSize = statSync(this.#options.blob).size
+		const { header: noteHeader, entryTotal: noteEntryTotal } = buildElfNoteHeader(
+			resource,
+			blobSize,
+		)
+		const noteAreaSize = this.#align(noteEntryTotal, 8)
+
+		const newEntryCount = headers.length + 2
+		const phtSize = newEntryCount * phdrEntrySize
+		const regionSize = noteAreaSize + phtSize
+
+		const fileSize = statSync(exePath).size
+		const regionStart = this.#align(fileSize, PAGE)
+		const phtOff = regionStart + noteAreaSize
+
+		const newLoad = {
+			type: PT_LOAD,
+			flags: PF_R,
+			offset: regionStart,
+			vaddr: regionVaddr,
+			paddr: regionVaddr,
+			filesz: regionSize,
+			memsz: regionSize,
+			align: PAGE,
+		}
+		const newNote = {
+			type: ELF_PT_NOTE,
+			flags: PF_R,
+			offset: regionStart,
+			vaddr: regionVaddr,
+			paddr: regionVaddr,
+			filesz: noteEntryTotal,
+			memsz: noteEntryTotal,
+			align: 4,
+		}
+
+		// Relocate PT_PHDR (if present) to point at the enlarged table, which
+		// itself lives inside the new PT_LOAD right after the note — keeping
+		// PT_PHDR's p_vaddr congruent with its covering segment.
+		const finalHeaders = headers.map((header) => {
+			if (header.type !== PT_PHDR) return header
+			const relVaddr = regionVaddr + (phtOff - regionStart)
+			return {
+				...header,
+				offset: phtOff,
+				vaddr: relVaddr,
+				paddr: relVaddr,
+				filesz: phtSize,
+				memsz: phtSize,
 			}
+		})
+		finalHeaders.push(newLoad, newNote)
 
-			// Write note header + name
-			appendFileSync(exePath, noteHeader)
+		const phtBuffer = Buffer.alloc(phtSize)
+		for (let i = 0; i < finalHeaders.length; i++) {
+			const entry = finalHeaders[i]
+			if (entry === undefined) continue
+			this.#writeElfProgramHeaderEntry(phtBuffer, i * phdrEntrySize, entry)
+		}
 
-			// Stream blob data
-			this.#appendFile(exePath, this.#options.blob)
+		// --- Append the new region: note header + streamed blob + padding + PHT ---
+		if (regionStart > fileSize) {
+			appendFileSync(exePath, Buffer.alloc(regionStart - fileSize))
+		}
+		appendFileSync(exePath, noteHeader)
+		this.#appendFile(exePath, this.#options.blob)
 
-			// Pad desc to alignment
-			const descPadding = alignedDescSize - blobSize
-			if (descPadding > 0) {
-				appendFileSync(exePath, Buffer.alloc(descPadding))
-			}
+		const alignedDescSize = this.#align(blobSize, 4)
+		const descPadding = alignedDescSize - blobSize
+		if (descPadding > 0) {
+			appendFileSync(exePath, Buffer.alloc(descPadding))
+		}
 
-			const totalNoteSize = noteHeader.length + alignedDescSize
+		const trailingPad = noteAreaSize - noteEntryTotal
+		if (trailingPad > 0) {
+			appendFileSync(exePath, Buffer.alloc(trailingPad))
+		}
 
-			// --- Update program header entry ---
-			const fd2 = openSync(exePath, 'r+')
-			try {
-				// p_type = PT_NOTE (4)
-				this.#writeU32(fd2, targetPhdrOffset, ELF_PT_NOTE)
-				// p_flags (4) = PF_R (0x4)
-				this.#writeU32(fd2, targetPhdrOffset + 4, 0x4)
-				// p_offset (8) = file offset of the note
-				this.#writeU64(fd2, targetPhdrOffset + 8, BigInt(noteFileOffset))
-				// p_vaddr (8) = 0 (not loaded into a specific VA)
-				this.#writeU64(fd2, targetPhdrOffset + 16, 0n)
-				// p_paddr (8) = 0
-				this.#writeU64(fd2, targetPhdrOffset + 24, 0n)
-				// p_filesz (8) = total note size
-				this.#writeU64(fd2, targetPhdrOffset + 32, BigInt(totalNoteSize))
-				// p_memsz (8) = same
-				this.#writeU64(fd2, targetPhdrOffset + 40, BigInt(totalNoteSize))
-				// p_align (8) = 4
-				this.#writeU64(fd2, targetPhdrOffset + 48, 4n)
-			} finally {
-				closeSync(fd2)
-			}
-		} catch (error: unknown) {
-			try {
-				closeSync(fd)
-			} catch {
-				/* already closed */
-			}
-			throw error
+		appendFileSync(exePath, phtBuffer)
+
+		// --- Point the ELF header at the relocated, enlarged PHT ---
+		const fd2 = openSync(exePath, 'r+')
+		try {
+			this.#writeU64(fd2, 32, BigInt(phtOff))
+			this.#writeU16(fd2, 56, newEntryCount)
+
+			// Build-time readback: locate the note the SAME way the runtime
+			// does (a PT_NOTE inside a PT_LOAD, address-congruent with its
+			// file offset) so a passing readback reflects runtime success.
+			this.#verifyElfNoteMapping(fd2, phtOff, newEntryCount, phdrEntrySize)
+		} finally {
+			closeSync(fd2)
 		}
 	}
 
-	// --- ELF: check if a note segment contains a note with the given name ---
+	// --- ELF: read all program header entries into memory ---
 
-	#elfNoteContains(fd: number, offset: number, size: number, name: string): boolean {
-		let pos = 0
-		while (pos + 12 <= size) {
-			const namesz = this.#readU32(fd, offset + pos)
-			const descsz = this.#readU32(fd, offset + pos + 4)
-
-			if (namesz > 0 && namesz <= 256) {
-				const nameBuf = Buffer.alloc(namesz)
-				readSync(fd, nameBuf, 0, namesz, offset + pos + 12)
-				const noteName = this.#stripTrailingNulls(nameBuf.toString('utf-8'))
-				if (noteName === name) return true
-			}
-
-			pos += 12 + this.#align(namesz, 4) + this.#align(descsz, 4)
+	#readElfProgramHeaders(
+		fd: number,
+		phdrOffset: number,
+		entrySize: number,
+		count: number,
+	): Array<{
+		type: number
+		flags: number
+		offset: number
+		vaddr: number
+		paddr: number
+		filesz: number
+		memsz: number
+		align: number
+	}> {
+		const headers: Array<{
+			type: number
+			flags: number
+			offset: number
+			vaddr: number
+			paddr: number
+			filesz: number
+			memsz: number
+			align: number
+		}> = []
+		for (let i = 0; i < count; i++) {
+			const off = phdrOffset + i * entrySize
+			headers.push({
+				type: this.#readU32(fd, off),
+				flags: this.#readU32(fd, off + 4),
+				offset: Number(this.#readU64(fd, off + 8)),
+				vaddr: Number(this.#readU64(fd, off + 16)),
+				paddr: Number(this.#readU64(fd, off + 24)),
+				filesz: Number(this.#readU64(fd, off + 32)),
+				memsz: Number(this.#readU64(fd, off + 40)),
+				align: Number(this.#readU64(fd, off + 48)),
+			})
 		}
-		return false
+		return headers
+	}
+
+	// --- ELF: serialize a single program header entry (56 bytes, ELF64) ---
+
+	#writeElfProgramHeaderEntry(
+		buf: Buffer,
+		pos: number,
+		entry: {
+			type: number
+			flags: number
+			offset: number
+			vaddr: number
+			paddr: number
+			filesz: number
+			memsz: number
+			align: number
+		},
+	): void {
+		buf.writeUInt32LE(entry.type >>> 0, pos)
+		buf.writeUInt32LE(entry.flags >>> 0, pos + 4)
+		buf.writeBigUInt64LE(BigInt(entry.offset), pos + 8)
+		buf.writeBigUInt64LE(BigInt(entry.vaddr), pos + 16)
+		buf.writeBigUInt64LE(BigInt(entry.paddr), pos + 24)
+		buf.writeBigUInt64LE(BigInt(entry.filesz), pos + 32)
+		buf.writeBigUInt64LE(BigInt(entry.memsz), pos + 40)
+		buf.writeBigUInt64LE(BigInt(entry.align), pos + 48)
+	}
+
+	// --- ELF: read a note's name at a given file offset (bounds-checked) ---
+
+	#readElfNoteName(fd: number, offset: number, size: number): string | undefined {
+		if (size < 12) return undefined
+		const namesz = this.#readU32(fd, offset)
+		const descsz = this.#readU32(fd, offset + 4)
+		if (namesz === 0 || namesz > 256) return undefined
+		if (12 + this.#align(namesz, 4) + this.#align(descsz, 4) > size) return undefined
+
+		const nameBuf = Buffer.alloc(namesz)
+		readSync(fd, nameBuf, 0, namesz, offset + 12)
+		return this.#stripTrailingNulls(nameBuf.toString('utf-8'))
+	}
+
+	// --- ELF: build-time readback — confirm the note is runtime-reachable ---
+
+	#verifyElfNoteMapping(
+		fd: number,
+		phdrOffset: number,
+		phdrCount: number,
+		phdrEntrySize: number,
+	): void {
+		const headers = this.#readElfProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
+		const loads = headers.filter((h) => h.type === 1)
+		const notes = headers.filter((h) => h.type === ELF_PT_NOTE)
+
+		for (const note of notes) {
+			const name = this.#readElfNoteName(fd, note.offset, note.filesz)
+			if (name === undefined || !name.startsWith('NODE_SEA')) continue
+
+			const covering = loads.find(
+				(load) => note.offset >= load.offset && note.offset < load.offset + load.filesz,
+			)
+			if (covering === undefined) continue
+
+			const expectedVaddr = covering.vaddr + (note.offset - covering.offset)
+			if (expectedVaddr === note.vaddr) return
+		}
+
+		throw new SEAError(
+			'INJECT',
+			'Injected ELF note is not reachable via a mapped PT_LOAD segment at runtime',
+			{ executable: this.#options.executable, resource: this.#options.resource },
+		)
 	}
 
 	// =========================================================================
@@ -1179,122 +1317,169 @@ export class Injector implements InjectorInterface {
 		const magic = buf.readUInt32LE(0)
 		if (magic !== MACHO_MAGIC_64) {
 			throw new SEAError('FORMAT', `Unsupported Mach-O magic: 0x${magic.toString(16)}`, {
-				executable: this.#options.executable,
+				executable: exePath,
 				magic,
 			})
 		}
 
+		const cputype = buf.readUInt32LE(4)
 		const ncmds = buf.readUInt32LE(16)
 		const sizeofcmds = buf.readUInt32LE(20)
 		const headerSize = 32 // Mach-O 64-bit header
 
-		// --- Find highest segment end and check for existing section ---
 		const segmentName = this.#options.macho?.segment ?? 'NODE_SEA'
 		let sectionName = this.#options.resource
 		if (!sectionName.startsWith('__')) {
 			sectionName = `__${sectionName}`
 		}
 
-		let highestFileEnd = 0
-		let highestVmEnd = BigInt(0)
+		// --- Walk load commands once, collecting their bounds ---
+		const commands: Array<{ type: number; size: number; offset: number }> = []
 		let cmdOffset = headerSize
-
 		for (let i = 0; i < ncmds; i++) {
+			if (cmdOffset + 8 > buf.length) {
+				throw new SEAError('FORMAT', 'Malformed Mach-O load command table', {
+					executable: exePath,
+				})
+			}
 			const cmdType = buf.readUInt32LE(cmdOffset)
 			const cmdSize = buf.readUInt32LE(cmdOffset + 4)
-
-			if (cmdType === MACHO_LC_SEGMENT_64) {
-				const segName = this.#stripTrailingNulls(
-					buf.subarray(cmdOffset + 8, cmdOffset + 24).toString('ascii'),
-				)
-				const vmaddr = buf.readBigUInt64LE(cmdOffset + 24)
-				const vmsize = buf.readBigUInt64LE(cmdOffset + 32)
-				const fileoff = buf.readBigUInt64LE(cmdOffset + 40)
-				const filesize = buf.readBigUInt64LE(cmdOffset + 48)
-
-				const segFileEnd = Number(fileoff) + Number(filesize)
-				if (segFileEnd > highestFileEnd) highestFileEnd = segFileEnd
-
-				const segVmEnd = vmaddr + vmsize
-				if (segVmEnd > highestVmEnd) highestVmEnd = segVmEnd
-
-				// Check for existing segment with same name
-				if (segName === segmentName) {
-					if (this.#options.overwrite === false) {
-						throw new SEAError('INJECT', `Segment "${segmentName}" already exists`, {
-							executable: this.#options.executable,
-							segmentName,
-						})
-					}
-					// For overwrite, we'll just add a new one at the end
-					// (the old one becomes dead space — macOS will load the last one)
-				}
+			if (cmdSize < 8 || cmdOffset + cmdSize > buf.length) {
+				throw new SEAError('FORMAT', 'Malformed Mach-O load command table', {
+					executable: exePath,
+				})
 			}
-
+			commands.push({ type: cmdType, size: cmdSize, offset: cmdOffset })
 			cmdOffset += cmdSize
 		}
 
-		// --- Check header space for new load command ---
-		// LC_SEGMENT_64 with one section = 72 (segment) + 80 (section) = 152 bytes
+		let linkeditIndex = -1
+		const existingSegmentIndices: number[] = []
+		for (let i = 0; i < commands.length; i++) {
+			const cmd = commands[i]
+			if (cmd === undefined || cmd.type !== MACHO_LC_SEGMENT_64) continue
+			const segName = this.#stripTrailingNulls(
+				buf.subarray(cmd.offset + 8, cmd.offset + 24).toString('ascii'),
+			)
+			if (segName === '__LINKEDIT') linkeditIndex = i
+			if (segName === segmentName) existingSegmentIndices.push(i)
+		}
+
+		if (existingSegmentIndices.length > 0 && this.#options.overwrite === false) {
+			throw new SEAError('INJECT', `Segment "${segmentName}" already exists`, {
+				executable: exePath,
+				segmentName,
+			})
+		}
+		const linkeditCmd = linkeditIndex === -1 ? undefined : commands[linkeditIndex]
+		if (linkeditCmd === undefined) {
+			throw new SEAError('INJECT', 'Mach-O binary has no __LINKEDIT segment', {
+				executable: exePath,
+			})
+		}
+
+		const Loff = Number(buf.readBigUInt64LE(linkeditCmd.offset + 40))
+		const Lsize = Number(buf.readBigUInt64LE(linkeditCmd.offset + 48))
+		const Lvm = buf.readBigUInt64LE(linkeditCmd.offset + 24)
+
+		const blobSize = statSync(this.#options.blob).size
+		// arm64 (0x0100000c) requires 16K pages; every other architecture (x86_64
+		// etc.) uses 4K — 0x4000 is a safe superset alignment for either.
+		const pageSize = cputype === 0x0100000c ? 0x4000 : 0x1000
+		const shift = this.#align(blobSize, pageSize)
+
+		// --- Ceiling check BEFORE mutating anything: the enlarged load-command
+		// region (plus 16 bytes reserved for codesign re-adding
+		// LC_CODE_SIGNATURE) must not overrun the first real section's bytes. ---
+		let firstSectionOffset = buf.length
+		for (const cmd of commands) {
+			if (cmd.type !== MACHO_LC_SEGMENT_64) continue
+			const nsects = buf.readUInt32LE(cmd.offset + 64)
+			for (let s = 0; s < nsects; s++) {
+				const sectOff = cmd.offset + 72 + s * 80
+				if (sectOff + 80 > buf.length) continue
+				const size = Number(buf.readBigUInt64LE(sectOff + 40))
+				const offset = buf.readUInt32LE(sectOff + 48)
+				if (size > 0 && offset > 0 && offset < firstSectionOffset) {
+					firstSectionOffset = offset
+				}
+			}
+		}
+
 		const newCmdSize = 72 + 80
-		const usedHeaderSpace = headerSize + sizeofcmds
+		const removedSize = commands
+			.filter((_c, i) => existingSegmentIndices.includes(i))
+			.reduce((sum, c) => sum + c.size, 0)
+		const newNcmds = commands.length - existingSegmentIndices.length + 1
+		const newSizeofcmds = sizeofcmds - removedSize + newCmdSize
 
-		// Find the actual first segment file offset
-		let firstSegOff = buf.length
-		cmdOffset = headerSize
-		for (let i = 0; i < ncmds; i++) {
-			const cmdType = buf.readUInt32LE(cmdOffset)
-			const cmdSize = buf.readUInt32LE(cmdOffset + 4)
-			if (cmdType === MACHO_LC_SEGMENT_64) {
-				const fileoff = Number(buf.readBigUInt64LE(cmdOffset + 40))
-				const filesize = Number(buf.readBigUInt64LE(cmdOffset + 48))
-				if (fileoff > 0 && filesize > 0 && fileoff < firstSegOff) {
-					firstSegOff = fileoff
-				}
-			}
-			cmdOffset += cmdSize
-		}
-
-		const availableSpace = firstSegOff - usedHeaderSpace
-		if (availableSpace < newCmdSize) {
+		if (headerSize + newSizeofcmds + 16 > firstSectionOffset) {
 			throw new SEAError(
 				'INJECT',
 				`Not enough header space for new Mach-O load command ` +
-					`(${String(availableSpace)} bytes available, need ${String(newCmdSize)})`,
-				{ executable: this.#options.executable, availableSpace, requiredSpace: newCmdSize },
+					`(need offset ${String(headerSize + newSizeofcmds + 16)}, first section at ${String(firstSectionOffset)})`,
+				{
+					executable: exePath,
+					firstSectionOffset,
+					requiredOffset: headerSize + newSizeofcmds + 16,
+				},
 			)
 		}
 
-		// --- Build new LC_SEGMENT_64 command ---
-		const blobSize = statSync(this.#options.blob).size
-		const pageSize = 16384 // macOS uses 16K pages on ARM64
-		const dataFileOffset = this.#align(Math.max(highestFileEnd, buf.length), pageSize)
-		const alignedBlobSize = this.#align(blobSize, pageSize)
-		const dataVmAddr = this.#alignBig(highestVmEnd, BigInt(pageSize))
+		// --- Mutate in place: shift __LINKEDIT and every linkedit-relative
+		// offset field in the surviving commands, using the ORIGINAL Loff as
+		// the "does this offset point into __LINKEDIT" threshold. ---
+		for (let i = 0; i < commands.length; i++) {
+			const cmd = commands[i]
+			if (cmd === undefined || existingSegmentIndices.includes(i)) continue
 
+			if (cmd.type === MACHO_LC_SEGMENT_64) {
+				const segName = this.#stripTrailingNulls(
+					buf.subarray(cmd.offset + 8, cmd.offset + 24).toString('ascii'),
+				)
+				if (segName === '__LINKEDIT') {
+					const nsects = buf.readUInt32LE(cmd.offset + 64)
+					if (nsects > 0) {
+						throw new SEAError('INJECT', '__LINKEDIT segment with sections is not supported', {
+							executable: exePath,
+						})
+					}
+					buf.writeBigUInt64LE(Lvm + BigInt(shift), cmd.offset + 24) // vmaddr
+					buf.writeBigUInt64LE(BigInt(Loff + shift), cmd.offset + 40) // fileoff
+					// filesize/vmsize unchanged — __LINKEDIT keeps its size, only moves.
+				}
+				continue
+			}
+
+			this.#shiftMachoLinkeditOffsets(buf, cmd, Loff, shift)
+		}
+
+		buf.writeUInt32LE(newNcmds, 16)
+		buf.writeUInt32LE(newSizeofcmds, 20)
+
+		// --- Build the new NODE_SEA segment command: it takes __LINKEDIT's
+		// OLD slot (before __LINKEDIT), inserted before __LINKEDIT so
+		// codesign's appended signature at EOF (inside __LINKEDIT) survives. ---
 		const cmd = Buffer.alloc(newCmdSize)
-
-		// LC_SEGMENT_64 header (72 bytes)
-		cmd.writeUInt32LE(MACHO_LC_SEGMENT_64, 0) // cmd
-		cmd.writeUInt32LE(newCmdSize, 4) // cmdsize
-		cmd.write(segmentName, 8, 16, 'ascii') // segname[16]
-		cmd.writeBigUInt64LE(dataVmAddr, 24) // vmaddr
-		cmd.writeBigUInt64LE(BigInt(alignedBlobSize), 32) // vmsize
-		cmd.writeBigUInt64LE(BigInt(dataFileOffset), 40) // fileoff
-		cmd.writeBigUInt64LE(BigInt(alignedBlobSize), 48) // filesize
+		cmd.writeUInt32LE(MACHO_LC_SEGMENT_64, 0)
+		cmd.writeUInt32LE(newCmdSize, 4)
+		cmd.write(segmentName, 8, 16, 'ascii')
+		cmd.writeBigUInt64LE(Lvm, 24) // vmaddr
+		cmd.writeBigUInt64LE(BigInt(shift), 32) // vmsize
+		cmd.writeBigUInt64LE(BigInt(Loff), 40) // fileoff
+		cmd.writeBigUInt64LE(BigInt(shift), 48) // filesize
 		cmd.writeUInt32LE(1, 56) // maxprot: VM_PROT_READ
 		cmd.writeUInt32LE(1, 60) // initprot: VM_PROT_READ
 		cmd.writeUInt32LE(1, 64) // nsects
 		cmd.writeUInt32LE(0, 68) // flags
 
-		// Section header (80 bytes at offset 72)
 		const sectOff = 72
-		cmd.write(sectionName, sectOff, 16, 'ascii') // sectname[16]
-		cmd.write(segmentName, sectOff + 16, 16, 'ascii') // segname[16]
-		cmd.writeBigUInt64LE(dataVmAddr, sectOff + 32) // addr
+		cmd.write(sectionName, sectOff, 16, 'ascii')
+		cmd.write(segmentName, sectOff + 16, 16, 'ascii')
+		cmd.writeBigUInt64LE(Lvm, sectOff + 32) // addr
 		cmd.writeBigUInt64LE(BigInt(blobSize), sectOff + 40) // size
-		cmd.writeUInt32LE(dataFileOffset, sectOff + 48) // offset
-		cmd.writeUInt32LE(0, sectOff + 52) // align (2^0 = 1)
+		cmd.writeUInt32LE(Loff, sectOff + 48) // offset
+		cmd.writeUInt32LE(0, sectOff + 52) // align
 		cmd.writeUInt32LE(0, sectOff + 56) // reloff
 		cmd.writeUInt32LE(0, sectOff + 60) // nreloc
 		cmd.writeUInt32LE(0, sectOff + 64) // flags
@@ -1302,31 +1487,147 @@ export class Injector implements InjectorInterface {
 		cmd.writeUInt32LE(0, sectOff + 72) // reserved2
 		cmd.writeUInt32LE(0, sectOff + 76) // reserved3
 
-		// --- Write load command into header space ---
-		const newCmdOffset = headerSize + sizeofcmds
-		cmd.copy(buf, newCmdOffset)
-
-		// Update Mach-O header
-		buf.writeUInt32LE(ncmds + 1, 16) // ncmds
-		buf.writeUInt32LE(sizeofcmds + newCmdSize, 20) // sizeofcmds
-
-		// Write modified header region back
-		writeFileSync(exePath, buf)
-
-		// --- Append blob data at the aligned offset ---
-		const currentSize = statSync(exePath).size
-		if (dataFileOffset > currentSize) {
-			appendFileSync(exePath, Buffer.alloc(dataFileOffset - currentSize))
+		const pieces: Buffer[] = []
+		for (let i = 0; i < commands.length; i++) {
+			if (existingSegmentIndices.includes(i)) continue
+			const c = commands[i]
+			if (c === undefined) continue
+			pieces.push(Buffer.from(buf.subarray(c.offset, c.offset + c.size)))
 		}
+		pieces.push(cmd)
+		const newLoadCmdsBuf = Buffer.concat(pieces)
+		if (newLoadCmdsBuf.length !== newSizeofcmds) {
+			throw new SEAError('INJECT', 'Internal Mach-O load command size mismatch', {
+				executable: exePath,
+			})
+		}
+
+		// --- Rewrite the file: header+LCs, unchanged body up to Loff, the
+		// blob (streamed, padded to `shift`), then the relocated __LINKEDIT. ---
+		const prefix = Buffer.concat([
+			buf.subarray(0, headerSize),
+			newLoadCmdsBuf,
+			buf.subarray(headerSize + sizeofcmds, Loff),
+		])
+		writeFileSync(exePath, prefix)
 
 		this.#appendFile(exePath, this.#options.blob)
-
-		// Pad to page alignment
-		const totalWritten = statSync(exePath).size
-		const targetEnd = dataFileOffset + alignedBlobSize
-		if (totalWritten < targetEnd) {
-			appendFileSync(exePath, Buffer.alloc(targetEnd - totalWritten))
+		const blobPadding = shift - blobSize
+		if (blobPadding > 0) {
+			appendFileSync(exePath, Buffer.alloc(blobPadding))
 		}
+		appendFileSync(exePath, buf.subarray(Loff, Loff + Lsize))
+
+		// Build-time readback: verify the section by its section table entry,
+		// consistent with what was just written.
+		this.#verifyMachoSection(exePath, segmentName, sectionName, Loff, blobSize)
+	}
+
+	// --- Mach-O: shift every linkedit-relative offset field in a load command
+	// that points at or past `threshold` by `shift` bytes ---
+
+	#shiftMachoLinkeditOffsets(
+		buf: Buffer,
+		cmd: { type: number; offset: number },
+		threshold: number,
+		shift: number,
+	): void {
+		const bump = (fieldOffset: number): void => {
+			if (fieldOffset + 4 > buf.length) return
+			const value = buf.readUInt32LE(fieldOffset)
+			if (value >= threshold && value > 0) {
+				buf.writeUInt32LE(value + shift, fieldOffset)
+			}
+		}
+		const base = cmd.offset
+		switch (cmd.type) {
+			case 0x2: // LC_SYMTAB: symoff@+8, stroff@+16
+				bump(base + 8)
+				bump(base + 16)
+				break
+			case 0xb: // LC_DYSYMTAB: tocoff/modtaboff/extrefsymoff/indirectsymoff/extreloff/locreloff
+				bump(base + 32)
+				bump(base + 40)
+				bump(base + 48)
+				bump(base + 56)
+				bump(base + 64)
+				bump(base + 72)
+				break
+			case 0x22: // LC_DYLD_INFO
+			case 0x80000022: // LC_DYLD_INFO_ONLY
+				bump(base + 8) // rebase_off
+				bump(base + 16) // bind_off
+				bump(base + 24) // weak_bind_off
+				bump(base + 32) // lazy_bind_off
+				bump(base + 40) // export_off
+				break
+			case 0x1d: // LC_CODE_SIGNATURE
+			case 0x1e: // LC_SEGMENT_SPLIT_INFO
+			case 0x26: // LC_FUNCTION_STARTS
+			case 0x29: // LC_DATA_IN_CODE
+			case 0x80000033: // LC_DYLD_EXPORTS_TRIE
+			case 0x80000034: // LC_DYLD_CHAINED_FIXUPS
+				bump(base + 8) // dataoff (linkedit_data_command)
+				break
+			default:
+				break
+		}
+	}
+
+	// --- Mach-O: build-time readback — confirm the section table entry
+	// matches what was written, the same shape the runtime's getsectdata
+	// lookup relies on ---
+
+	#verifyMachoSection(
+		exePath: string,
+		segmentName: string,
+		sectionName: string,
+		expectedOffset: number,
+		expectedSize: number,
+	): void {
+		const fd = openSync(exePath, 'r')
+		try {
+			const header = Buffer.alloc(32)
+			readSync(fd, header, 0, 32, 0)
+			const ncmds = header.readUInt32LE(16)
+
+			let offset = 32
+			for (let i = 0; i < ncmds; i++) {
+				const cmdHead = Buffer.alloc(8)
+				readSync(fd, cmdHead, 0, 8, offset)
+				const cmdType = cmdHead.readUInt32LE(0)
+				const cmdSize = cmdHead.readUInt32LE(4)
+
+				if (cmdType === MACHO_LC_SEGMENT_64 && cmdSize >= 72) {
+					const segBuf = Buffer.alloc(cmdSize)
+					readSync(fd, segBuf, 0, cmdSize, offset)
+					const segName = this.#stripTrailingNulls(segBuf.subarray(8, 24).toString('ascii'))
+					if (segName === segmentName) {
+						const nsects = segBuf.readUInt32LE(64)
+						for (let s = 0; s < nsects; s++) {
+							const sectOff = 72 + s * 80
+							if (sectOff + 80 > segBuf.length) continue
+							const secName = this.#stripTrailingNulls(
+								segBuf.subarray(sectOff, sectOff + 16).toString('ascii'),
+							)
+							if (secName !== sectionName) continue
+							const secSize = Number(segBuf.readBigUInt64LE(sectOff + 40))
+							const secOffset = segBuf.readUInt32LE(sectOff + 48)
+							if (secOffset === expectedOffset && secSize === expectedSize) return
+						}
+					}
+				}
+				offset += cmdSize
+			}
+		} finally {
+			closeSync(fd)
+		}
+
+		throw new SEAError('INJECT', 'Injected Mach-O section not found after write', {
+			executable: exePath,
+			segmentName,
+			sectionName,
+		})
 	}
 
 	// =========================================================================
@@ -1374,9 +1675,26 @@ export class Injector implements InjectorInterface {
 		return remainder === 0 ? value : value + (alignment - remainder)
 	}
 
-	#alignBig(value: bigint, alignment: bigint): bigint {
-		const remainder = value % alignment
-		return remainder === 0n ? value : value + (alignment - remainder)
+	// --- PE: validate section/file alignment before any #align call uses it
+	// as a divisor — a malformed 0 value would otherwise silently corrupt
+	// output via NaN -> #writeU32 coercion. ---
+
+	#ensureValidPEAlignment(sectionAlignment: number, fileAlignment: number): void {
+		const isPowerOfTwo = (n: number): boolean => n > 0 && (n & (n - 1)) === 0
+		if (!isPowerOfTwo(sectionAlignment) || !isPowerOfTwo(fileAlignment)) {
+			throw new SEAError('FORMAT', 'PE section/file alignment must be a nonzero power of two', {
+				executable: this.#options.executable,
+				sectionAlignment,
+				fileAlignment,
+			})
+		}
+		if (sectionAlignment < fileAlignment) {
+			throw new SEAError('FORMAT', 'PE sectionAlignment must be >= fileAlignment', {
+				executable: this.#options.executable,
+				sectionAlignment,
+				fileAlignment,
+			})
+		}
 	}
 
 	/** Append sourceFile to targetFile by streaming in 4 MB chunks */

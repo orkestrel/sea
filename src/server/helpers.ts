@@ -24,6 +24,9 @@ import {
 	writeFileSync,
 	fsyncSync,
 	renameSync,
+	ftruncateSync,
+	fstatSync,
+	lstatSync,
 } from 'node:fs'
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
 import { resolve, relative, join, extname, isAbsolute, sep, dirname } from 'node:path'
@@ -231,6 +234,21 @@ export function compressFile(
 		},
 	})
 
+	// walkDirectory already skips symlinks on the read side; mirror that here
+	// on the write side so a planted symlink at `output` (e.g. `X.br -> /victim`)
+	// cannot redirect this write to an arbitrary file.
+	let outputStat: ReturnType<typeof lstatSync> | undefined
+	try {
+		outputStat = lstatSync(output)
+	} catch {
+		outputStat = undefined
+	}
+	if (outputStat !== undefined && outputStat.isSymbolicLink()) {
+		throw new SEAError('OUTPUT', 'Refusing to write compressed output through a symlink', {
+			output,
+		})
+	}
+
 	writeFileSync(output, compressed)
 
 	return {
@@ -358,6 +376,15 @@ export function patchPESubsystem(path: string, subsystem: number): void {
  * Remove the Authenticode signature from a PE executable by zeroing
  * the security directory entry in the optional header.
  *
+ * @remarks
+ * If the certificate overlay described by the security directory sits at the
+ * very end of the file (the common case for `signtool`-signed binaries), the
+ * file is truncated to the certificate's start FIRST so the overlay bytes are
+ * discarded rather than left as dead weight for a downstream injector to
+ * bury mid-file. The directory read is bounds-checked so a malformed or
+ * truncated security directory cannot throw unexpectedly — it is simply
+ * skipped and only the directory entry is zeroed.
+ *
  * @param path - Path to the executable
  */
 export function stripPESignature(path: string): void {
@@ -369,6 +396,20 @@ export function stripPESignature(path: string): void {
 		const magic = readU16(fd, peOffset + 24)
 		// PE32+ has security dir at different offset than PE32
 		const securityDirOffset = magic === 0x20b ? peOffset + 168 : peOffset + 152
+
+		const dirBuf = Buffer.alloc(8)
+		const dirRead = readSync(fd, dirBuf, 0, 8, securityDirOffset)
+		if (dirRead === 8) {
+			const certOffset = dirBuf.readUInt32LE(0)
+			const certSize = dirBuf.readUInt32LE(4)
+			if (certOffset > 0 && certSize > 0) {
+				const fileSize = fstatSync(fd).size
+				if (certOffset <= fileSize && certOffset + certSize === fileSize) {
+					ftruncateSync(fd, certOffset)
+				}
+			}
+		}
+
 		// Zero out the 8-byte security directory entry (VirtualAddress + Size)
 		const zeroes = Buffer.alloc(8)
 		writeSync(fd, zeroes, 0, 8, securityDirOffset)
@@ -732,6 +773,53 @@ export function createBlobConfig(
 		...(assets ? { assets } : {}),
 		...(format === 'esm' ? { mainFormat: 'module' } : {}),
 	}
+}
+
+// === ELF Helpers
+
+/**
+ * Build an ELF `PT_NOTE` entry's header bytes (namesz/descsz/type + padded
+ * name) for the SEA blob note, without the blob body itself.
+ *
+ * @remarks
+ * A pure leaf extracted from the ELF injector: the blob body is streamed
+ * from disk separately (never buffered here) so this only produces the
+ * fixed-size note header and reports the total on-disk size the complete
+ * note entry (header + 4-byte-padded blob) will occupy, so the caller can
+ * size the covering `PT_LOAD`/`PT_NOTE` segments before writing anything.
+ * The Node.js SEA runtime matches a note by the first 8 bytes of its name
+ * (`strncmp(name, "NODE_SEA", 8)`), so `resource` is written in full but
+ * only needs to begin with those 8 bytes to be found at runtime.
+ *
+ * @param resource - Note name (SEA resource identifier, e.g. `NODE_SEA_BLOB`)
+ * @param blobSize - Size in bytes of the SEA blob that will follow the header
+ * @returns The note header bytes and the total on-disk size of header + blob
+ *
+ * @example
+ * ```ts
+ * const { header, entryTotal } = buildElfNoteHeader('NODE_SEA_BLOB', 4096)
+ * ```
+ */
+export function buildElfNoteHeader(
+	resource: string,
+	blobSize: number,
+): { readonly header: Buffer; readonly entryTotal: number } {
+	const alignTo4 = (value: number): number => {
+		const remainder = value % 4
+		return remainder === 0 ? value : value + (4 - remainder)
+	}
+
+	const nameBytes = Buffer.from(`${resource}\0`, 'utf-8')
+	const alignedNameSize = alignTo4(nameBytes.length)
+
+	const header = Buffer.alloc(12 + alignedNameSize)
+	header.writeUInt32LE(nameBytes.length, 0) // namesz
+	header.writeUInt32LE(blobSize, 4) // descsz
+	header.writeUInt32LE(0, 8) // type
+	nameBytes.copy(header, 12)
+
+	const alignedDescSize = alignTo4(blobSize)
+	return { header, entryTotal: header.length + alignedDescSize }
 }
 
 // === SEA Helpers
