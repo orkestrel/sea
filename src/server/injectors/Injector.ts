@@ -42,6 +42,7 @@ import {
 	MACHO_LC_SEGMENT_64,
 } from '../constants.js'
 import { patchSentinelFuse } from '../helpers.js'
+import { SEAError } from '../errors.js'
 
 // === Injector
 
@@ -91,8 +92,10 @@ export class Injector implements InjectorInterface {
 			if (magic32 === ELF_MAGIC) return 'elf'
 			if (magic32le === MACHO_MAGIC_64) return 'macho'
 
-			throw new Error(
+			throw new SEAError(
+				'FORMAT',
 				`Unknown executable format (magic: 0x${magic32.toString(16).padStart(8, '0')})`,
+				{ executable: this.#options.executable, magic: magic32 },
 			)
 		} finally {
 			closeSync(fd)
@@ -118,7 +121,10 @@ export class Injector implements InjectorInterface {
 			const peOffset = this.#readU32(fd, 0x3c)
 			const sig = this.#readU32(fd, peOffset)
 			if (sig !== PE_SIGNATURE) {
-				throw new Error('Invalid PE signature')
+				throw new SEAError('FORMAT', 'Invalid PE signature', {
+					executable: this.#options.executable,
+					signature: sig,
+				})
 			}
 
 			const coffOffset = peOffset + 4
@@ -129,7 +135,11 @@ export class Injector implements InjectorInterface {
 			const optMagic = this.#readU16(fd, optionalOffset)
 			const is64 = optMagic === PE32_PLUS_MAGIC
 			if (optMagic !== PE32_MAGIC && optMagic !== PE32_PLUS_MAGIC) {
-				throw new Error(`Unsupported PE optional header magic: 0x${optMagic.toString(16)}`)
+				throw new SEAError(
+					'FORMAT',
+					`Unsupported PE optional header magic: 0x${optMagic.toString(16)}`,
+					{ executable: this.#options.executable, optionalHeaderMagic: optMagic },
+				)
 			}
 
 			const sectionAlignment = this.#readU32(fd, optionalOffset + 32)
@@ -200,9 +210,15 @@ export class Injector implements InjectorInterface {
 			)
 			const availableHeaderSpace = firstSectionFileOffset - sectionTableEnd
 			if (availableHeaderSpace < PE_SECTION_HEADER_SIZE) {
-				throw new Error(
+				throw new SEAError(
+					'INJECT',
 					'No room in PE header for a new section entry ' +
 						`(${String(availableHeaderSpace)} bytes available, need ${String(PE_SECTION_HEADER_SIZE)})`,
+					{
+						executable: this.#options.executable,
+						availableHeaderSpace,
+						requiredHeaderSpace: PE_SECTION_HEADER_SIZE,
+					},
 				)
 			}
 
@@ -932,10 +948,16 @@ export class Injector implements InjectorInterface {
 			const elfData = identBuf.readUInt8(5)
 
 			if (elfClass !== ELF_CLASS_64) {
-				throw new Error('Only 64-bit ELF executables are supported')
+				throw new SEAError('FORMAT', 'Only 64-bit ELF executables are supported', {
+					executable: this.#options.executable,
+					elfClass,
+				})
 			}
 			if (elfData !== ELF_DATA_LSB) {
-				throw new Error('Only little-endian ELF executables are supported')
+				throw new SEAError('FORMAT', 'Only little-endian ELF executables are supported', {
+					executable: this.#options.executable,
+					elfData,
+				})
 			}
 
 			// ELF64 header fields
@@ -961,7 +983,11 @@ export class Injector implements InjectorInterface {
 							targetPhdrOffset = off
 							break
 						}
-						throw new Error(`Note with name "${this.#options.resource}" already exists`)
+						throw new SEAError(
+							'INJECT',
+							`Note with name "${this.#options.resource}" already exists`,
+							{ executable: this.#options.executable, resource: this.#options.resource },
+						)
 					}
 				}
 
@@ -972,8 +998,10 @@ export class Injector implements InjectorInterface {
 			}
 
 			if (targetPhdrOffset === -1) {
-				throw new Error(
+				throw new SEAError(
+					'INJECT',
 					'No free program header entry (PT_NULL) available for a new PT_NOTE segment',
+					{ executable: this.#options.executable, programHeaderCount: phdrCount },
 				)
 			}
 
@@ -1089,7 +1117,10 @@ export class Injector implements InjectorInterface {
 		// --- Parse Mach-O header ---
 		const magic = buf.readUInt32LE(0)
 		if (magic !== MACHO_MAGIC_64) {
-			throw new Error(`Unsupported Mach-O magic: 0x${magic.toString(16)}`)
+			throw new SEAError('FORMAT', `Unsupported Mach-O magic: 0x${magic.toString(16)}`, {
+				executable: this.#options.executable,
+				magic,
+			})
 		}
 
 		const ncmds = buf.readUInt32LE(16)
@@ -1129,7 +1160,10 @@ export class Injector implements InjectorInterface {
 				// Check for existing segment with same name
 				if (segName === segmentName) {
 					if (this.#options.overwrite === false) {
-						throw new Error(`Segment "${segmentName}" already exists`)
+						throw new SEAError('INJECT', `Segment "${segmentName}" already exists`, {
+							executable: this.#options.executable,
+							segmentName,
+						})
 					}
 					// For overwrite, we'll just add a new one at the end
 					// (the old one becomes dead space — macOS will load the last one)
@@ -1162,9 +1196,11 @@ export class Injector implements InjectorInterface {
 
 		const availableSpace = firstSegOff - usedHeaderSpace
 		if (availableSpace < newCmdSize) {
-			throw new Error(
+			throw new SEAError(
+				'INJECT',
 				`Not enough header space for new Mach-O load command ` +
 					`(${String(availableSpace)} bytes available, need ${String(newCmdSize)})`,
+				{ executable: this.#options.executable, availableSpace, requiredSpace: newCmdSize },
 			)
 		}
 

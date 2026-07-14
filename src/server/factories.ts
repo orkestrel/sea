@@ -23,7 +23,7 @@ import { AssetManager } from './assets/AssetManager.js'
  * ```ts
  * const seal = createSEA({
  *     name: 'orkestrel',
- *     entry: 'dist/bin/serve.cjs',
+ *     entry: { path: 'dist/bin/serve.cjs' },
  *     output: 'dist/sea',
  *     assets: { 'index.html.br': 'dist/client/index.html.br' },
  *     compression: { paths: ['dist/client'] },

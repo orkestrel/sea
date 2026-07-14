@@ -1,8 +1,9 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { Injector } from '@src/server'
+import { Injector, isSEAError } from '@src/server'
 import { createInjectorOptions, withTestDir } from '../../../setupServer.js'
+import { captureError } from '../../../setup.js'
 
 describe('Injector', () => {
 	it('detects PE executables', async () => {
@@ -78,14 +79,37 @@ describe('Injector', () => {
 			writeFileSync(executable, Buffer.from([0x00, 0x01, 0x02, 0x03]))
 			writeFileSync(blob, 'blob')
 
-			expect(() => {
+			const error = captureError(() => {
 				return new Injector(
 					createInjectorOptions({
 						executable,
 						blob,
 					}),
 				)
-			}).toThrow('Unknown executable format')
+			})
+
+			expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+		})
+	})
+
+	it('throws for garbage binary content', async () => {
+		await withTestDir({}, async (dir) => {
+			const executable = join(dir.root, 'garbage.bin')
+			const blob = join(dir.root, 'blob.bin')
+
+			writeFileSync(executable, Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00]))
+			writeFileSync(blob, 'blob')
+
+			const error = captureError(() => {
+				return new Injector(
+					createInjectorOptions({
+						executable,
+						blob,
+					}),
+				)
+			})
+
+			expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
 		})
 	})
 })

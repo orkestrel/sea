@@ -1,9 +1,12 @@
 import type {
 	ExecutableFormat,
+	SEABlobOptions,
 	SEACompressionManifest,
 	SEACompressionOptions,
 	SEACompressionResult,
 	SEACompressionSize,
+	SEAEntryOptions,
+	SEAErrorCode,
 	SEAPlatform,
 	SEAShellOptions,
 } from './types.js'
@@ -13,14 +16,16 @@ import {
 	readSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	writeSync,
 	closeSync,
 	writeFileSync,
+	fsyncSync,
+	renameSync,
 } from 'node:fs'
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
-import { resolve, relative, join, extname } from 'node:path'
+import { resolve, relative, join, extname, isAbsolute, sep } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { isRecord } from '@orkestrel/contract'
 import {
 	BROTLI_EXTENSION,
 	DEFAULT_SEA_COMPRESSION_QUALITY,
@@ -28,7 +33,7 @@ import {
 	SEA_PLATFORMS,
 	SKIP_EXTENSIONS,
 } from './constants.js'
-import { ShellError } from './errors.js'
+import { SEAError, ShellError } from './errors.js'
 
 // === Type Guards
 
@@ -67,14 +72,15 @@ export function isPlatformSupported(platform?: string): boolean {
 // === Filesystem Helpers
 
 /**
- * Assert that a path exists, throwing with a descriptive message if not.
+ * Assert that a path exists, throwing a coded {@link SEAError} if not.
  *
  * @param path - Absolute or relative path to check
  * @param message - Error message when path is missing
+ * @param code - Error code to throw with. Default: `'STATE'`.
  */
-export function ensureExists(path: string, message: string): void {
+export function ensureExists(path: string, message: string, code?: SEAErrorCode): void {
 	if (!existsSync(path)) {
-		throw new Error(message)
+		throw new SEAError(code ?? 'STATE', message, { path })
 	}
 }
 
@@ -102,6 +108,9 @@ export function walkDirectory(directory: string, base?: string): readonly string
 	const entries = readdirSync(directory, { withFileTypes: true })
 
 	for (const entry of entries) {
+		// Symlinks can escape the compression root (point outside `directory`),
+		// which would make the walk non-deterministic across platforms/filesystems.
+		if (entry.isSymbolicLink()) continue
 		const fullPath = join(directory, entry.name)
 		if (entry.isDirectory()) {
 			result.push(...walkDirectory(fullPath, root))
@@ -119,14 +128,20 @@ export function walkDirectory(directory: string, base?: string): readonly string
  * Run a command synchronously and return stdout.
  *
  * @param command - Command to execute (first element is the binary)
- * @param options - Shell options (cwd, env)
+ * @param options - Shell options (cwd, env, timeout, signal)
  * @returns stdout as a Buffer
+ * @throws SEAError with code `'STATE'` when `command` is empty
+ * @throws SEAError with code `'ABORT'` when `options.signal` is already aborted
+ * @throws SEAError with code `'TIMEOUT'` when the command exceeds `options.timeout`
  * @throws ShellError when the command exits with non-zero status
  */
-export function runShell(command: readonly string[], options?: SEAShellOptions): Buffer {
+export function runShell(command: string[], options?: SEAShellOptions): Buffer {
 	const [cmd, ...args] = command
 	if (cmd === undefined) {
-		throw new Error('Command array must not be empty')
+		throw new SEAError('STATE', 'Command array must not be empty')
+	}
+	if (options?.signal?.aborted === true) {
+		throw new SEAError('ABORT', 'Shell command aborted', { command })
 	}
 	// Node v22+ blocks direct execFileSync of .cmd/.bat files without a shell (EINVAL)
 	const useShell = cmd.endsWith('.cmd') || cmd.endsWith('.bat')
@@ -136,17 +151,24 @@ export function runShell(command: readonly string[], options?: SEAShellOptions):
 			env: options?.env !== undefined ? { ...process.env, ...options.env } : undefined,
 			stdio: ['pipe', 'pipe', 'pipe'],
 			shell: useShell,
+			timeout: options?.timeout,
 		})
 	} catch (thrown: unknown) {
-		if (
-			isRecord(thrown) &&
-			thrown.stdout instanceof Buffer &&
-			thrown.stderr instanceof Buffer &&
-			typeof thrown.message === 'string'
-		) {
-			throw new ShellError(thrown.message, thrown.stdout, thrown.stderr)
+		if (!(thrown instanceof Error)) {
+			throw thrown
 		}
-		throw thrown
+		const code = 'code' in thrown && typeof thrown.code === 'string' ? thrown.code : undefined
+		if (code === 'ETIMEDOUT') {
+			throw new SEAError('TIMEOUT', 'Shell command timed out', {
+				command,
+				timeout: options?.timeout,
+			})
+		}
+		const stdout =
+			'stdout' in thrown && Buffer.isBuffer(thrown.stdout) ? thrown.stdout : Buffer.alloc(0)
+		const stderr =
+			'stderr' in thrown && Buffer.isBuffer(thrown.stderr) ? thrown.stderr : Buffer.alloc(0)
+		throw new ShellError(thrown.message, stdout, stderr)
 	}
 }
 
@@ -346,6 +368,208 @@ export function formatSize(bytes: number): string {
 	return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
+/**
+ * Assert that an asset key is safe to use as a relative filesystem/archive key.
+ *
+ * @remarks
+ * Rejects an empty key, an absolute path, a key containing a backslash, a
+ * Windows drive-relative specifier (e.g. `'C:foo'`), or any `/`-separated
+ * segment equal to `'..'` — all of which could escape the intended asset root.
+ *
+ * @param key - Asset key to validate
+ * @throws SEAError with code `'ASSET'` when the key is unsafe
+ *
+ * @example
+ * ```ts
+ * ensureSafeKey('client.html.br') // ok
+ * ensureSafeKey('../secrets') // throws SEAError('ASSET', ...)
+ * ensureSafeKey('C:foo') // throws SEAError('ASSET', ...)
+ * ```
+ */
+export function ensureSafeKey(key: string): void {
+	if (key.length === 0) {
+		throw new SEAError('ASSET', 'Asset key must not be empty', { key })
+	}
+	if (isAbsolute(key)) {
+		throw new SEAError('ASSET', 'Asset key must not be an absolute path', { key })
+	}
+	if (key.includes('\\')) {
+		throw new SEAError('ASSET', 'Asset key must not contain a backslash', { key })
+	}
+	if (/^[A-Za-z]:/.test(key)) {
+		throw new SEAError('ASSET', 'Asset key must not be a drive-relative specifier', { key })
+	}
+	if (key.split('/').includes('..')) {
+		throw new SEAError('ASSET', 'Asset key must not contain a ".." segment', { key })
+	}
+}
+
+/**
+ * Assert that `path` (resolved against `base`) real-path-resolves to a
+ * location inside `base`, defeating a symlink escape.
+ *
+ * @remarks
+ * Resolves `path` against `base`, then dereferences both the resolved path
+ * and `base` with `realpathSync` and requires the real resolved path to
+ * equal the real base or begin with the real base plus a path separator.
+ * Dereferencing BOTH sides means a symlinked base itself (e.g. macOS `/tmp`
+ * -> `/private/tmp`) still matches, while a symlink inside the tree that
+ * points outside the real base is correctly rejected. A `realpathSync`
+ * failure (e.g. `ENOENT`) is wrapped as a coded `SEAError` rather than
+ * leaking the raw Node error.
+ *
+ * @param base - Absolute path to the containing root
+ * @param path - Path to validate, resolved against `base` if relative
+ * @returns The real (symlink-resolved) contained path
+ * @throws SEAError with code `'ASSET'` when the real path escapes `base`
+ * @throws SEAError with code `'ASSET'` when the path cannot be resolved
+ *
+ * @example
+ * ```ts
+ * ensureContained('/dist/app', 'browser') // '/dist/app/browser' (real path)
+ * ensureContained('/dist/app', '../../etc') // throws SEAError('ASSET', ...)
+ * ```
+ */
+export function ensureContained(base: string, path: string): string {
+	const resolved = resolve(base, path)
+
+	let real: string
+	let realBase: string
+	try {
+		real = realpathSync(resolved)
+		realBase = realpathSync(base)
+	} catch (thrown: unknown) {
+		const cause = thrown instanceof Error ? thrown.message : String(thrown)
+		throw new SEAError('ASSET', 'Path not found or unresolvable', { path, cause })
+	}
+
+	if (real !== realBase && !real.startsWith(realBase + sep)) {
+		throw new SEAError('ASSET', 'Path escapes the build root', { base, path })
+	}
+
+	return real
+}
+
+/**
+ * Assert that `name` is a single safe path segment suitable as an output
+ * executable base name.
+ *
+ * @remarks
+ * Rejects an empty name, `'.'`, `'..'`, a name containing a `/` or `\`
+ * separator, an absolute path, or a Windows drive-relative specifier (e.g.
+ * `'C:foo'`) — all of which could redirect the output executable outside
+ * the intended output directory.
+ *
+ * @param name - Output executable base name to validate
+ * @throws SEAError with code `'ASSET'` when the name is unsafe
+ *
+ * @example
+ * ```ts
+ * ensureSafeName('myapp') // ok
+ * ensureSafeName('../evil') // throws SEAError('ASSET', ...)
+ * ```
+ */
+export function ensureSafeName(name: string): void {
+	if (name.length === 0 || name === '.' || name === '..') {
+		throw new SEAError('ASSET', 'Executable name must be a single path segment', { name })
+	}
+	if (name.includes('/') || name.includes('\\')) {
+		throw new SEAError('ASSET', 'Executable name must not contain a path separator', { name })
+	}
+	if (isAbsolute(name)) {
+		throw new SEAError('ASSET', 'Executable name must not be an absolute path', { name })
+	}
+	if (/^[A-Za-z]:/.test(name)) {
+		throw new SEAError('ASSET', 'Executable name must not be a drive-relative specifier', {
+			name,
+		})
+	}
+}
+
+/**
+ * Finalize a built executable by durably flushing it to disk and atomically
+ * moving it into place.
+ *
+ * @remarks
+ * Opens `source` for read/write, `fsync`s it to force the OS to flush buffered
+ * writes, closes it, then `rename`s it to `target`. Never deletes `target` on
+ * failure — the caller retains whatever was previously there.
+ *
+ * @param source - Absolute path to the built (temporary) executable
+ * @param target - Absolute path to move the finalized executable to
+ * @throws SEAError with code `'OUTPUT'` when any step fails
+ *
+ * @example
+ * ```ts
+ * finalizeExecutable('/tmp/build/app.tmp', '/dist/app')
+ * ```
+ */
+export function finalizeExecutable(source: string, target: string): void {
+	try {
+		const fd = openSync(source, 'r+')
+		try {
+			fsyncSync(fd)
+		} finally {
+			closeSync(fd)
+		}
+		renameSync(source, target)
+	} catch (thrown: unknown) {
+		const cause = thrown instanceof Error ? thrown.message : String(thrown)
+		throw new SEAError('OUTPUT', 'Failed to finalize executable', { source, target, cause })
+	}
+}
+
+/**
+ * Build the Node.js `--experimental-sea-config` JSON object for a SEA blob.
+ *
+ * @remarks
+ * A pure leaf extracted from the SEA build orchestrator. The `mainFormat`
+ * field (`'commonjs' | 'module'`) exists only in Node >= 25.7 — for a `'cjs'`
+ * entry (the default) `mainFormat` is OMITTED entirely so the config still
+ * builds on older Node hosts where `'commonjs'` is already the implicit
+ * default; for an `'esm'` entry `mainFormat: 'module'` is set explicitly
+ * (this requires a Node >= 25.7 build host). Node also documents that
+ * `useSnapshot` is incompatible with an ESM entry — combining the two throws.
+ *
+ * @param entry - SEA entry point options
+ * @param blob - Absolute output path for the generated blob
+ * @param assets - Optional key→path mapping for embedded assets
+ * @param options - Optional blob behavior overrides (cache, snapshot)
+ * @returns the SEA config object, ready to be written to disk as JSON
+ * @throws SEAError with code `'BLOB'` when `useSnapshot` is combined with an ESM entry
+ *
+ * @example
+ * ```ts
+ * const config = createBlobConfig({ path: 'dist/bin/serve.cjs' }, 'dist/bin/sea-prep.blob', undefined)
+ * ```
+ */
+export function createBlobConfig(
+	entry: SEAEntryOptions,
+	blob: string,
+	assets: Readonly<Record<string, string>> | undefined,
+	options?: SEABlobOptions,
+): Readonly<Record<string, unknown>> {
+	const format = entry.format ?? 'cjs'
+	const snapshot = options?.snapshot ?? false
+
+	if (format === 'esm' && snapshot) {
+		throw new SEAError(
+			'BLOB',
+			'useSnapshot cannot be combined with an ESM entry (mainFormat module)',
+		)
+	}
+
+	return {
+		main: entry.path,
+		output: blob,
+		disableExperimentalSEAWarning: true,
+		useSnapshot: snapshot,
+		useCodeCache: options?.cache ?? true,
+		...(assets ? { assets } : {}),
+		...(format === 'esm' ? { mainFormat: 'module' } : {}),
+	}
+}
+
 // === SEA Helpers
 
 /**
@@ -381,7 +605,7 @@ export function patchSentinelFuse(executable: string, fuse: string): void {
 				const valueRead = readSync(fd, valueBuf, 0, 2, fuseEnd)
 
 				if (valueRead < 2) {
-					throw new Error('Could not read sentinel fuse value')
+					throw new SEAError('FUSE', 'Could not read sentinel fuse value', { executable, fuse })
 				}
 
 				const value = valueBuf.toString('utf-8')
@@ -395,13 +619,19 @@ export function patchSentinelFuse(executable: string, fuse: string): void {
 					return // Already patched
 				}
 
-				throw new Error(`Unexpected sentinel fuse value: ${value}`)
+				throw new SEAError('FUSE', `Unexpected sentinel fuse value: ${value}`, {
+					executable,
+					fuse,
+				})
 			}
 
 			offset += chunkSize
 		}
 
-		throw new Error(`Sentinel fuse not found in executable: ${fuse}`)
+		throw new SEAError('FUSE', `Sentinel fuse not found in executable: ${fuse}`, {
+			executable,
+			fuse,
+		})
 	} finally {
 		closeSync(fd)
 	}

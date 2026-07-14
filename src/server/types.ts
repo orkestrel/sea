@@ -86,6 +86,7 @@ export interface SEAPlatform {
 	readonly executable: string
 	readonly remove?: readonly string[]
 	readonly sign?: readonly string[]
+	readonly verify?: readonly string[]
 }
 
 /**
@@ -109,6 +110,8 @@ export type WindowsSubsystem = 'console' | 'gui'
 export interface SEAShellOptions {
 	readonly cwd?: string
 	readonly env?: Readonly<Record<string, string>>
+	readonly timeout?: number
+	readonly signal?: AbortSignal
 }
 
 // === Injector
@@ -234,6 +237,72 @@ export interface AssetManagerInterface {
  */
 export type SEAStatus = 'idle' | 'active' | 'done' | 'error'
 
+/**
+ * Machine-readable error code carried by every {@link SEAError}.
+ *
+ * @remarks
+ * `PLATFORM` — unsupported or misdetected platform.
+ * `ENTRY`    — invalid or missing entry point.
+ * `ASSET`    — invalid asset key or content.
+ * `BLOB`     — SEA blob generation failure.
+ * `FORMAT`   — unrecognized executable binary format.
+ * `INJECT`   — resource injection failure.
+ * `FUSE`     — sentinel fuse patch failure.
+ * `SIGN`     — code signing failure.
+ * `SHELL`    — shell command exited non-zero.
+ * `TIMEOUT`  — shell command exceeded its timeout.
+ * `ABORT`    — operation aborted via `AbortSignal`.
+ * `OUTPUT`   — final executable write/finalize failure.
+ * `STATE`    — invalid internal state or argument.
+ */
+export type SEAErrorCode =
+	| 'PLATFORM'
+	| 'ENTRY'
+	| 'ASSET'
+	| 'BLOB'
+	| 'FORMAT'
+	| 'INJECT'
+	| 'FUSE'
+	| 'SIGN'
+	| 'SHELL'
+	| 'TIMEOUT'
+	| 'ABORT'
+	| 'OUTPUT'
+	| 'STATE'
+
+/**
+ * SEA entry point module format.
+ *
+ * @remarks
+ * `cjs` — CommonJS entry (Node default).
+ * `esm` — ECMAScript module entry (requires Node >= 25.7).
+ */
+export type SEAEntryFormat = 'cjs' | 'esm'
+
+/**
+ * Options describing the SEA entry point.
+ *
+ * @remarks
+ * `path`   — path to the entry point to embed.
+ * `format` — module format of the entry point. Default: `'cjs'`.
+ */
+export interface SEAEntryOptions {
+	readonly path: string
+	readonly format?: SEAEntryFormat
+}
+
+/**
+ * Options controlling generated SEA blob behavior.
+ *
+ * @remarks
+ * `cache`    — maps to the SEA config `useCodeCache`. Default: `true`.
+ * `snapshot` — maps to the SEA config `useSnapshot`. Default: `false`.
+ */
+export interface SEABlobOptions {
+	readonly cache?: boolean
+	readonly snapshot?: boolean
+}
+
 /** Events emitted by a {@link SEAInterface}. */
 export type SEAEventMap = {
 	compress: readonly [compression: SEACompressionManifest | undefined]
@@ -248,23 +317,27 @@ export type SEAEventMap = {
  *
  * @remarks
  * `name`        — output executable name (no extension).
- * `entry`       — path to the CJS entry point to embed.
+ * `entry`       — the entry point to embed (path and module format).
  * `output`      — directory for the final executable.
  * `assets`      — key→path mapping for SEA embedded assets.
  * `compression` — directories to Brotli-compress before embedding.
  * `windows`     — Windows-specific build options (PE subsystem).
  * `root`        — project root directory. Default: `process.cwd()`.
+ * `signal`      — an `AbortSignal` that cancels the build in progress.
+ * `blob`        — options controlling generated SEA blob behavior.
  */
 export interface SEAOptions {
 	readonly on?: EmitterHooks<SEAEventMap>
 	readonly error?: EmitterErrorHandler
 	readonly name: string
-	readonly entry: string
+	readonly entry: SEAEntryOptions
 	readonly output: string
 	readonly assets?: Readonly<Record<string, string>>
 	readonly compression?: SEACompressionOptions
 	readonly windows?: SEAWindowsOptions
 	readonly root?: string
+	readonly signal?: AbortSignal
+	readonly blob?: SEABlobOptions
 }
 
 /**
@@ -286,6 +359,9 @@ export interface SEAWindowsOptions {
  * `size`        — file size of the executable in bytes.
  * `duration`    — build time in milliseconds.
  * `compression` — compression manifest when directories were compressed.
+ * `signed`      — whether the executable was code-signed.
+ * `stripped`    — whether an existing signature was removed before signing.
+ * `subsystem`   — the Windows PE subsystem patched onto the executable, if any.
  */
 export interface SEAResult {
 	readonly executable: string
@@ -293,6 +369,9 @@ export interface SEAResult {
 	readonly size: number
 	readonly duration: number
 	readonly compression?: SEACompressionManifest
+	readonly signed: boolean
+	readonly stripped: boolean
+	readonly subsystem?: WindowsSubsystem
 }
 
 /**

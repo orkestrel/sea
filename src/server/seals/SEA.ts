@@ -13,10 +13,20 @@ import type {
 	SEAOptions,
 	SEAResult,
 	SEAStatus,
+	WindowsSubsystem,
 } from '../types.js'
 import type { EmitterInterface } from '@orkestrel/emitter'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import {
+	chmodSync,
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs'
 import { join, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { Emitter } from '@orkestrel/emitter'
 import {
 	SEA_BLOB_RESOURCE,
@@ -26,7 +36,12 @@ import {
 } from '../constants.js'
 import {
 	compressDirectory,
+	createBlobConfig,
+	ensureContained,
 	ensureExists,
+	ensureSafeKey,
+	ensureSafeName,
+	finalizeExecutable,
 	isPEExecutable,
 	isPlatformSupported,
 	patchPESubsystem,
@@ -34,6 +49,7 @@ import {
 	runShell,
 	stripPESignature,
 } from '../helpers.js'
+import { SEAError } from '../errors.js'
 import { Injector } from '../injectors/Injector.js'
 
 // === SEA
@@ -59,15 +75,17 @@ export class SEA implements SEAInterface {
 
 	async execute(): Promise<SEAResult> {
 		if (this.#destroyed) {
-			throw new Error('SEA is destroyed')
+			throw new SEAError('STATE', 'SEA is destroyed')
 		}
 		if (this.#status === 'active') {
-			throw new Error('SEA build already in progress')
+			throw new SEAError('STATE', 'SEA build already in progress')
 		}
 
 		const platform = platformConfig()
 		if (platform === undefined || !isPlatformSupported()) {
-			const error = new Error(`Unsupported platform: ${process.platform}`)
+			const error = new SEAError('PLATFORM', `Unsupported platform: ${process.platform}`, {
+				platform: process.platform,
+			})
 			this.#status = 'error'
 			this.#emitter.emit('error', error)
 			throw error
@@ -78,18 +96,29 @@ export class SEA implements SEAInterface {
 		const root = this.#options.root ?? process.cwd()
 
 		try {
+			this.#check()
+			this.#validate(root)
+
+			this.#check()
 			const compression = this.#compress(root)
+
+			this.#check()
 			const blob = this.#blob(root)
-			const executable = this.#assemble(root, blob)
-			const size = statSync(executable).size
+
+			this.#check()
+			const assembled = this.#assemble(root, blob)
+			const size = statSync(assembled.executable).size
 			const duration = Date.now() - start
 
 			const result: SEAResult = {
-				executable,
+				executable: assembled.executable,
 				platform: process.platform,
 				size,
 				duration,
 				compression,
+				signed: assembled.signed,
+				stripped: assembled.stripped,
+				subsystem: assembled.subsystem,
 			}
 
 			this.#status = 'done'
@@ -108,6 +137,31 @@ export class SEA implements SEAInterface {
 		this.#emitter.destroy()
 	}
 
+	// Throws SEAError('ABORT', ...) when the caller's signal has fired.
+	#check(): void {
+		if (this.#options.signal?.aborted === true) {
+			throw new SEAError('ABORT', 'SEA build aborted')
+		}
+	}
+
+	// Validates every asset key/path and compression path before any work runs.
+	#validate(root: string): void {
+		const base = resolve(root)
+
+		ensureSafeName(this.#options.name)
+
+		for (const [key, path] of Object.entries(this.#options.assets ?? {})) {
+			ensureSafeKey(key)
+			ensureSafeKey(path)
+			ensureContained(base, path)
+		}
+
+		for (const path of this.#options.compression?.paths ?? []) {
+			ensureSafeKey(path)
+			ensureContained(base, path)
+		}
+	}
+
 	#compress(root: string): SEACompressionManifest | undefined {
 		const compression = this.#options.compression
 		if (compression === undefined || compression.paths.length === 0) {
@@ -120,6 +174,7 @@ export class SEA implements SEAInterface {
 		let compressed = 0
 
 		for (const path of compression.paths) {
+			this.#check()
 			const directory = resolve(root, path)
 			if (!existsSync(directory)) {
 				continue
@@ -146,84 +201,178 @@ export class SEA implements SEAInterface {
 	}
 
 	#blob(root: string): string {
-		const entry = resolve(root, this.#options.entry)
-		ensureExists(entry, `Entry not found: ${this.#options.entry}`)
+		const entry = resolve(root, this.#options.entry.path)
+		ensureExists(entry, `Entry not found: ${this.#options.entry.path}`, 'ENTRY')
 
 		const output = resolve(root, this.#options.output)
 		mkdirSync(output, { recursive: true })
 
 		const configPath = join(output, 'sea-config.json')
 		const blob = join(output, 'sea-prep.blob')
-		const config = {
-			main: entry,
-			output: blob,
-			disableExperimentalSEAWarning: true,
-			useSnapshot: false,
-			useCodeCache: true,
-			...(this.#options.assets !== undefined ? { assets: this.#assets(root) } : {}),
-		}
+		const config = createBlobConfig(
+			{ path: entry, format: this.#options.entry.format },
+			blob,
+			this.#assets(root),
+			this.#options.blob,
+		)
 
 		writeFileSync(configPath, JSON.stringify(config, null, 2))
-		runShell([process.execPath, '--experimental-sea-config', configPath], { cwd: output })
+		runShell([process.execPath, '--experimental-sea-config', configPath], {
+			cwd: output,
+			signal: this.#options.signal,
+		})
 
 		if (!existsSync(blob)) {
-			throw new Error('SEA blob generation failed — blob not found')
+			throw new SEAError('BLOB', 'SEA blob generation failed — blob not found', { blob })
 		}
 
 		this.#emitter.emit('blob', blob)
 		return blob
 	}
 
-	#assemble(root: string, blob: string): string {
+	// Assembles the final executable in a same-directory temp file, mutating it
+	// through strip -> inject -> sign -> verify, then atomically finalizing it
+	// into place. Any failure removes the temp file and leaves the prior output
+	// (if any) untouched.
+	#assemble(
+		root: string,
+		blob: string,
+	): { executable: string; signed: boolean; stripped: boolean; subsystem?: WindowsSubsystem } {
 		const platform = platformConfig()
 		if (platform === undefined) {
-			throw new Error(`Unsupported platform: ${process.platform}`)
+			throw new SEAError('PLATFORM', `Unsupported platform: ${process.platform}`, {
+				platform: process.platform,
+			})
 		}
 
 		const output = resolve(root, this.#options.output)
+		const ext = process.platform === 'win32' ? '.exe' : ''
 		const name = process.platform === 'win32' ? `${this.#options.name}.exe` : this.#options.name
-		const executable = join(output, name)
+		const finalOutput = join(output, name)
+		const temp = join(output, `.${this.#options.name}-${randomUUID()}.tmp${ext}`)
 
-		copyFileSync(process.execPath, executable)
-		if (process.platform !== 'win32') {
-			chmodSync(executable, 0o755)
-		}
+		let signed = false
+		let stripped = false
+		let subsystem: WindowsSubsystem | undefined
 
-		if (platform.remove !== undefined) {
-			try {
-				if (process.platform === 'win32') {
-					stripPESignature(executable)
-				} else {
-					runShell([...platform.remove, executable])
+		try {
+			if (process.platform === 'darwin') {
+				this.#check()
+				copyFileSync(process.execPath, temp)
+				chmodSync(temp, 0o755)
+
+				if (platform.remove !== undefined) {
+					this.#check()
+					try {
+						runShell([...platform.remove, temp], { signal: this.#options.signal })
+					} catch (thrown: unknown) {
+						throw new SEAError('SIGN', 'Failed to strip existing signature', {
+							cause: thrown instanceof Error ? thrown.message : String(thrown),
+						})
+					}
+					stripped = true
 				}
-			} catch {}
+
+				this.#check()
+				const injector = new Injector({
+					executable: temp,
+					resource: SEA_BLOB_RESOURCE,
+					blob,
+					fuse: SEA_SENTINEL_FUSE,
+					macho: { segment: 'NODE_SEA' },
+				})
+				injector.inject()
+
+				if (platform.sign !== undefined) {
+					this.#check()
+					try {
+						runShell([...platform.sign, temp], { signal: this.#options.signal })
+					} catch (thrown: unknown) {
+						throw new SEAError('SIGN', 'Failed to sign executable', {
+							cause: thrown instanceof Error ? thrown.message : String(thrown),
+						})
+					}
+
+					if (platform.verify !== undefined) {
+						this.#check()
+						try {
+							runShell([...platform.verify, temp], { signal: this.#options.signal })
+						} catch (thrown: unknown) {
+							throw new SEAError('SIGN', 'Signature verification failed', {
+								cause: thrown instanceof Error ? thrown.message : String(thrown),
+							})
+						}
+					}
+
+					signed = true
+				}
+			} else if (process.platform === 'win32') {
+				this.#check()
+				copyFileSync(process.execPath, temp)
+
+				stripPESignature(temp)
+				stripped = true
+
+				if (isPEExecutable(temp)) {
+					subsystem = this.#options.windows?.subsystem === 'gui' ? 'gui' : 'console'
+					const value = subsystem === 'gui' ? WINDOWS_SUBSYSTEM_GUI : WINDOWS_SUBSYSTEM_CONSOLE
+					patchPESubsystem(temp, value)
+				}
+
+				this.#check()
+				const injector = new Injector({
+					executable: temp,
+					resource: SEA_BLOB_RESOURCE,
+					blob,
+					fuse: SEA_SENTINEL_FUSE,
+				})
+				injector.inject()
+
+				if (platform.sign !== undefined) {
+					this.#check()
+					try {
+						runShell([...platform.sign, temp], { signal: this.#options.signal })
+					} catch (thrown: unknown) {
+						throw new SEAError('SIGN', 'Failed to sign executable', {
+							cause: thrown instanceof Error ? thrown.message : String(thrown),
+						})
+					}
+					signed = true
+
+					if (platform.verify !== undefined) {
+						this.#check()
+						try {
+							runShell([...platform.verify, temp], { signal: this.#options.signal })
+						} catch (thrown: unknown) {
+							throw new SEAError('SIGN', 'Signature verification failed', {
+								cause: thrown instanceof Error ? thrown.message : String(thrown),
+							})
+						}
+					}
+				}
+			} else {
+				this.#check()
+				copyFileSync(process.execPath, temp)
+				chmodSync(temp, 0o755)
+
+				this.#check()
+				const injector = new Injector({
+					executable: temp,
+					resource: SEA_BLOB_RESOURCE,
+					blob,
+					fuse: SEA_SENTINEL_FUSE,
+				})
+				injector.inject()
+			}
+
+			finalizeExecutable(temp, finalOutput)
+		} catch (thrown: unknown) {
+			rmSync(temp, { force: true })
+			throw thrown
 		}
 
-		const injector = new Injector({
-			executable,
-			resource: SEA_BLOB_RESOURCE,
-			blob,
-			fuse: SEA_SENTINEL_FUSE,
-			macho: { segment: 'NODE_SEA' },
-		})
-		injector.inject()
-
-		if (platform.sign !== undefined) {
-			try {
-				runShell([...platform.sign, executable])
-			} catch {}
-		}
-
-		if (process.platform === 'win32' && isPEExecutable(executable)) {
-			const subsystem =
-				this.#options.windows?.subsystem === 'gui'
-					? WINDOWS_SUBSYSTEM_GUI
-					: WINDOWS_SUBSYSTEM_CONSOLE
-			patchPESubsystem(executable, subsystem)
-		}
-
-		this.#emitter.emit('assemble', executable)
-		return executable
+		this.#emitter.emit('assemble', finalOutput)
+		return { executable: finalOutput, signed, stripped, subsystem }
 	}
 
 	#assets(root: string): Readonly<Record<string, string>> {

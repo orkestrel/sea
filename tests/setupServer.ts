@@ -82,7 +82,7 @@ export function existsOnDisk(root: string, relativePath: string): boolean {
 export function createSEAOptions(overrides?: Partial<SEAOptions>): SEAOptions {
 	return {
 		name: 'seal-test',
-		entry: 'entry.cjs',
+		entry: { path: 'entry.cjs' },
 		output: 'dist',
 		...overrides,
 	}

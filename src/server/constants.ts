@@ -1,4 +1,4 @@
-import type { SEACompressionMode, SEAPlatform } from './types.js'
+import type { SEACompressionMode, SEAEntryFormat, SEAPlatform } from './types.js'
 
 /** SEA sentinel fuse value embedded in the Node.js binary */
 export const SEA_SENTINEL_FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2'
@@ -42,6 +42,9 @@ export const SKIP_EXTENSIONS = new Set([
 	'.zip',
 	'.tar',
 ])
+
+/** Default SEA entry point module format when none is specified */
+export const DEFAULT_ENTRY_FORMAT: SEAEntryFormat = 'cjs'
 
 /** Asset key for the raw (uncompressed) client HTML entry */
 export const CLIENT_ASSET_KEY_RAW = 'client.html'
@@ -118,18 +121,21 @@ export const PE_SCN_MEM_READ = 0x40000000
 export const SEA_PLATFORMS: Readonly<Record<string, SEAPlatform>> = Object.freeze({
 	win32: Object.freeze({
 		executable: 'node.exe',
-		remove: Object.freeze(['signtool', 'remove', '/s']),
+		remove: undefined,
 		sign: undefined,
+		verify: undefined,
 	}),
 	darwin: Object.freeze({
 		executable: 'node',
 		remove: Object.freeze(['codesign', '--remove-signature']),
 		sign: Object.freeze(['codesign', '--sign', '-']),
+		verify: Object.freeze(['codesign', '--verify', '--strict']),
 	}),
 	linux: Object.freeze({
 		executable: 'node',
 		remove: undefined,
 		sign: undefined,
+		verify: undefined,
 	}),
 })
 

@@ -9,7 +9,7 @@ import { createSEA, formatSize } from '@orkestrel/sea'
 
 const sea = createSEA({
 	name: 'myapp',
-	entry: 'dist/server/serve.cjs',
+	entry: { path: 'dist/server/serve.cjs' },
 	output: 'dist/sea',
 	assets: { 'model.gguf': 'models/model.gguf' },
 	compression: { paths: ['dist/app/browser'], mode: 'text' },
@@ -23,6 +23,8 @@ process.stdout.write(
 ```
 
 `sea.execute()` runs the three-step pipeline — compress assets, generate the blob, assemble and sign the executable — and transitions `sea.status` from `'idle'` to `'active'` to `'done'` (or `'error'`). `sea.emitter` reports progress on `compress`, `blob`, `assemble`, and `complete`.
+
+`SEAOptions.entry` is a `SEAEntryOptions` object (`{ path, format? }`) rather than a bare path — `format` selects the entry module format (`'cjs'` default, or `'esm'` on Node >= 25.7). Every domain failure throws a `SEAError` carrying a machine-readable `SEAErrorCode`; narrow a caught value with `isSEAError`. `SEAResult` additionally reports `signed`, `stripped`, and the patched `subsystem` (Windows only).
 
 ## Surface
 
@@ -78,31 +80,39 @@ process.stdout.write(
 | `PE_SCN_MEM_READ`                 | const | Section is readable.                                                        |
 | `SEA_PLATFORMS`                   | const | Platform-specific SEA build configurations.                                 |
 | `SEA_COMPRESSION_MODE_VALUES`     | const | Maps a `SEACompressionMode` to its numeric Brotli mode value.               |
+| `DEFAULT_ENTRY_FORMAT`            | const | Default SEA entry point module format when none is specified.               |
 
 ### Helpers and errors
 
-| API                   | Kind     | Summary                                                                 |
-| --------------------- | -------- | ----------------------------------------------------------------------- |
-| `isExecutableFormat`  | function | Check if a value is a valid `ExecutableFormat`.                         |
-| `platformConfig`      | function | Get the platform configuration for the current OS.                      |
-| `isPlatformSupported` | function | Check if the current or specified platform is supported for SEA builds. |
-| `ensureExists`        | function | Assert that a path exists, throwing with a descriptive message if not.  |
-| `isCompressible`      | function | Check if a file should be Brotli-compressed based on its extension.     |
-| `walkDirectory`       | function | Recursively walk a directory and return all file paths.                 |
-| `runShell`            | function | Run a command synchronously and return stdout; throws `ShellError`.     |
-| `computeSize`         | function | Compute a size comparison between original and compressed byte counts.  |
-| `compressFile`        | function | Brotli-compress a single file, writing the output alongside it.         |
-| `compressDirectory`   | function | Compress all compressible files in a directory tree.                    |
-| `parsePEOffset`       | function | Parse the PE header offset from a Windows executable.                   |
-| `readU16`             | function | Read a 16-bit unsigned integer from a file descriptor.                  |
-| `writeU16`            | function | Write a 16-bit unsigned integer to a file descriptor.                   |
-| `isPEExecutable`      | function | Check if a file is a Windows PE executable.                             |
-| `patchPESubsystem`    | function | Patch the PE subsystem field in a Windows executable.                   |
-| `stripPESignature`    | function | Remove the Authenticode signature from a PE executable.                 |
-| `formatSize`          | function | Format a byte count as a human-readable string.                         |
-| `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                  |
-| `ShellError`          | class    | Error thrown when a shell command run via `runShell` exits non-zero.    |
-| `isShellError`        | function | Whether a value is a `ShellError`.                                      |
+| API                   | Kind     | Summary                                                                         |
+| --------------------- | -------- | ------------------------------------------------------------------------------- |
+| `isExecutableFormat`  | function | Check if a value is a valid `ExecutableFormat`.                                 |
+| `platformConfig`      | function | Get the platform configuration for the current OS.                              |
+| `isPlatformSupported` | function | Check if the current or specified platform is supported for SEA builds.         |
+| `ensureExists`        | function | Assert that a path exists, throwing with a descriptive message if not.          |
+| `isCompressible`      | function | Check if a file should be Brotli-compressed based on its extension.             |
+| `walkDirectory`       | function | Recursively walk a directory and return all file paths.                         |
+| `runShell`            | function | Run a command synchronously and return stdout; throws `ShellError`.             |
+| `computeSize`         | function | Compute a size comparison between original and compressed byte counts.          |
+| `compressFile`        | function | Brotli-compress a single file, writing the output alongside it.                 |
+| `compressDirectory`   | function | Compress all compressible files in a directory tree.                            |
+| `parsePEOffset`       | function | Parse the PE header offset from a Windows executable.                           |
+| `readU16`             | function | Read a 16-bit unsigned integer from a file descriptor.                          |
+| `writeU16`            | function | Write a 16-bit unsigned integer to a file descriptor.                           |
+| `isPEExecutable`      | function | Check if a file is a Windows PE executable.                                     |
+| `patchPESubsystem`    | function | Patch the PE subsystem field in a Windows executable.                           |
+| `stripPESignature`    | function | Remove the Authenticode signature from a PE executable.                         |
+| `formatSize`          | function | Format a byte count as a human-readable string.                                 |
+| `ensureSafeKey`       | function | Assert that an asset key is safe to use as a relative filesystem key.           |
+| `ensureContained`     | function | Assert a path real-path-resolves inside a base root (blocks symlink escape).    |
+| `ensureSafeName`      | function | Assert that a name is a single safe path segment (output executable base name). |
+| `finalizeExecutable`  | function | Durably flush and atomically move a built executable into place.                |
+| `createBlobConfig`    | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
+| `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                          |
+| `SEAError`            | class    | The coded base error for every failure raised by the seal build.                |
+| `isSEAError`          | function | Whether a value is a `SEAError`.                                                |
+| `ShellError`          | class    | Error thrown when a shell command run via `runShell` exits non-zero.            |
+| `isShellError`        | function | Whether a value is a `ShellError`.                                              |
 
 ### Types
 
@@ -127,10 +137,14 @@ process.stdout.write(
 | `AssetManagerOptions`    | interface | Options for creating an `AssetManagerInterface`.                             |
 | `AssetManagerInterface`  | interface | Named asset collection with SEA and disk loading.                            |
 | `SEAStatus`              | type      | Overall status of the seal build.                                            |
+| `SEAErrorCode`           | type      | Machine-readable error code carried by every `SEAError`.                     |
+| `SEAEntryFormat`         | type      | SEA entry point module format (`cjs` / `esm`).                               |
+| `SEAEntryOptions`        | interface | Options describing the SEA entry point (path and module format).             |
+| `SEABlobOptions`         | interface | Options controlling generated SEA blob behavior (cache, snapshot).           |
 | `SEAEventMap`            | type      | Events emitted by a `SEAInterface`.                                          |
 | `SEAOptions`             | interface | Options for creating a SEA build.                                            |
 | `SEAWindowsOptions`      | interface | Windows-specific SEA build options.                                          |
-| `SEAResult`              | interface | Result of a successful seal build.                                           |
+| `SEAResult`              | interface | Result of a successful seal build (adds `signed`, `stripped`, `subsystem`).  |
 | `SEAInterface`           | interface | SEA build orchestrator contract.                                             |
 
 ## Usage
@@ -193,6 +207,8 @@ import {
 	patchPESubsystem,
 	stripPESignature,
 	patchSentinelFuse,
+	ensureContained,
+	ensureSafeName,
 } from '@orkestrel/sea'
 
 try {
@@ -223,6 +239,9 @@ const fd = 0 // an open file descriptor from openSync in real usage
 // parsePEOffset(fd) / readU16(fd, offset) / writeU16(fd, offset, value)
 // isPEExecutable(path) / patchPESubsystem(path, subsystem) / stripPESignature(path)
 // patchSentinelFuse(executable, fuse)
+
+ensureContained('/dist/app', 'browser') // real, symlink-resolved path inside the base root
+ensureSafeName('myapp') // ok; throws SEAError('ASSET', ...) for '../evil' or 'a/b'
 ```
 
 ## See also
