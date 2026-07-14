@@ -9,7 +9,7 @@
  * Mach-O — appends an LC_SEGMENT_64 load command with a section.
  */
 
-import type { ExecutableFormat, InjectorInterface, InjectorOptions } from '../../types.js'
+import type { ExecutableFormat, InjectorInterface, InjectorOptions } from '../types.js'
 import {
 	openSync,
 	readSync,
@@ -40,8 +40,8 @@ import {
 	ELF_PT_NOTE,
 	MACHO_MAGIC_64,
 	MACHO_LC_SEGMENT_64,
-} from '../../constants.js'
-import { patchSentinelFuse } from '../../helpers.js'
+} from '../constants.js'
+import { patchSentinelFuse } from '../helpers.js'
 
 // === Injector
 
@@ -486,11 +486,11 @@ export class Injector implements InjectorInterface {
 
 	#rvaToFileOffset(
 		rva: number,
-		sections: ReadonlyArray<{
-			readonly virtualAddress: number
-			readonly virtualSize: number
-			readonly rawSize: number
-			readonly rawOffset: number
+		sections: Array<{
+			virtualAddress: number
+			virtualSize: number
+			rawSize: number
+			rawOffset: number
 		}>,
 	): number {
 		for (const s of sections) {
@@ -505,15 +505,15 @@ export class Injector implements InjectorInterface {
 	// --- PE: build the resource tree for serialization ---
 
 	#buildResourceTree(
-		existingLeaves: ReadonlyArray<{
-			readonly typeId: number
-			readonly typeName: string | undefined
-			readonly nameId: number
-			readonly nameName: string | undefined
-			readonly language: number
-			readonly codePage: number
-			readonly dataRva: number
-			readonly dataSize: number
+		existingLeaves: Array<{
+			typeId: number
+			typeName: string | undefined
+			nameId: number
+			nameName: string | undefined
+			language: number
+			codePage: number
+			dataRva: number
+			dataSize: number
 		}>,
 		blobName: string,
 		blobSize: number,
@@ -893,7 +893,7 @@ export class Injector implements InjectorInterface {
 
 	// --- PE: sort resource keys (named first alphabetically, then IDs numerically) ---
 
-	#sortResourceKeys(keys: readonly string[]): readonly string[] {
+	#sortResourceKeys(keys: string[]): readonly string[] {
 		const named = keys
 			.filter((k) => k.startsWith('n:'))
 			.sort((a, b) => a.slice(2).localeCompare(b.slice(2), 'en', { sensitivity: 'base' }))

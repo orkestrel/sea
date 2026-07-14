@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AssetManager } from '@scsr/server'
+import { AssetManager } from '@src/server'
 
 describe('AssetManager', () => {
 	// === count / assets / keys

@@ -1,21 +1,22 @@
 {
-	"name": "@orkestrel/sqlite",
-	"version": "0.0.2",
-	"description": "A typed, synchronous SQLite wrapper for the @orkestrel line — prepared statements over node:sqlite. Part of the @orkestrel line.",
+	"name": "@orkestrel/sea",
+	"version": "0.0.1",
+	"description": "A pure-TypeScript Node.js Single Executable Application (SEA) builder — compresses assets, assembles the SEA blob, and injects it into PE/ELF/Mach-O binaries with no size ceiling. Part of the @orkestrel line.",
 	"keywords": [
-		"database",
+		"executable",
 		"node",
-		"node:sqlite",
+		"sea",
+		"seal",
 		"server",
-		"sqlite",
+		"single-executable-application",
 		"typescript"
 	],
-	"homepage": "https://github.com/orkestrel/sqlite#readme",
-	"bugs": "https://github.com/orkestrel/sqlite/issues",
+	"homepage": "https://github.com/orkestrel/sea#readme",
+	"bugs": "https://github.com/orkestrel/sea/issues",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/orkestrel/sqlite.git"
+		"url": "git+https://github.com/orkestrel/sea.git"
 	},
 	"files": [
 		"dist",
@@ -45,7 +46,6 @@
 	"scripts": {
 		"clean": "node -e \"try{require('node:fs').rmSync('dist',{recursive:true,force:true})}catch{}\"",
 		"copy": "node -e \"const fs=require('node:fs'),p=require('node:path'),a=process.argv[1],b=process.argv[2];fs.mkdirSync(p.dirname(b),{recursive:true});fs.cpSync(a,b,{force:true});console.log('Copied: '+a+' to '+b)\"",
-		"tmp:txt": "node -e \"const fs=require('node:fs'),p=require('node:path');function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const f=p.join(d,e.name);if(e.isDirectory()){walk(f)}else if(!e.name.endsWith('.md')&&!e.name.endsWith('.txt')){const t=f+'.txt';if(!fs.existsSync(t)){fs.renameSync(f,t)}else{console.warn('Skipping '+f+' — target exists: '+t)}}}}try{walk('tmp')}catch(e){if(e.code!=='ENOENT')throw e}\"",
 		"lint": "oxlint --config .oxlintrc.json --fix .",
 		"check": "tsc --noEmit --project tsconfig.json",
 		"check:src": "npm run check:src:server",
@@ -63,7 +63,8 @@
 		"prepublishOnly": "npm run format:check && npm run lint:check && npm run check && npm run check:src && npm run build && npm test"
 	},
 	"dependencies": {
-		"@orkestrel/contract": "^0.0.1"
+		"@orkestrel/contract": "^0.0.1",
+		"@orkestrel/emitter": "^0.0.1"
 	},
 	"devDependencies": {
 		"@microsoft/api-extractor": "^7.58.9",

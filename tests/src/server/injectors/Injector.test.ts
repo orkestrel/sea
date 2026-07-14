@@ -1,8 +1,8 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { Injector } from '@scsr/server'
-import { createInjectorOptions, withTestDir } from '../../../../setupServer.js'
+import { Injector } from '@src/server'
+import { createInjectorOptions, withTestDir } from '../../../setupServer.js'
 
 describe('Injector', () => {
 	it('detects PE executables', async () => {

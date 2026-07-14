@@ -1,5 +1,5 @@
 /**
- * Seal
+ * SEA
  *
  * Build orchestrator for Node.js Single Executable Applications.
  * Compresses assets, generates the SEA blob, copies the Node binary,
@@ -7,62 +7,62 @@
  */
 
 import type {
-	SealCompressionManifest,
-	SealEventMap,
-	SealInterface,
-	SealOptions,
-	SealResult,
-	SealStatus,
-} from '../../types.js'
-import type { EmitterInterface } from '@scsr/core'
+	SEACompressionManifest,
+	SEAEventMap,
+	SEAInterface,
+	SEAOptions,
+	SEAResult,
+	SEAStatus,
+} from '../types.js'
+import type { EmitterInterface } from '@orkestrel/emitter'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { Emitter } from '@scsr/core'
+import { Emitter } from '@orkestrel/emitter'
 import {
 	SEA_BLOB_RESOURCE,
 	SEA_SENTINEL_FUSE,
 	WINDOWS_SUBSYSTEM_CONSOLE,
 	WINDOWS_SUBSYSTEM_GUI,
-} from '../../constants.js'
+} from '../constants.js'
 import {
 	compressDirectory,
 	ensureExists,
-	isPeExecutable,
+	isPEExecutable,
 	isPlatformSupported,
-	patchPeSubsystem,
+	patchPESubsystem,
 	platformConfig,
 	runShell,
-	stripPeSignature,
-} from '../../helpers.js'
+	stripPESignature,
+} from '../helpers.js'
 import { Injector } from '../injectors/Injector.js'
 
-// === Seal
+// === SEA
 
-export class Seal implements SealInterface {
-	#status: SealStatus = 'idle'
+export class SEA implements SEAInterface {
+	#status: SEAStatus = 'idle'
 	#destroyed = false
-	readonly #options: SealOptions
-	readonly #emitter: Emitter<SealEventMap>
+	readonly #options: SEAOptions
+	readonly #emitter: Emitter<SEAEventMap>
 
-	constructor(options: SealOptions) {
+	constructor(options: SEAOptions) {
 		this.#options = options
-		this.#emitter = new Emitter({ on: options.on })
+		this.#emitter = new Emitter({ on: options.on, error: options.error })
 	}
 
-	get emitter(): EmitterInterface<SealEventMap> {
+	get emitter(): EmitterInterface<SEAEventMap> {
 		return this.#emitter
 	}
 
-	get status(): SealStatus {
+	get status(): SEAStatus {
 		return this.#status
 	}
 
-	async execute(): Promise<SealResult> {
+	async execute(): Promise<SEAResult> {
 		if (this.#destroyed) {
-			throw new Error('Seal is destroyed')
+			throw new Error('SEA is destroyed')
 		}
 		if (this.#status === 'active') {
-			throw new Error('Seal build already in progress')
+			throw new Error('SEA build already in progress')
 		}
 
 		const platform = platformConfig()
@@ -84,7 +84,7 @@ export class Seal implements SealInterface {
 			const size = statSync(executable).size
 			const duration = Date.now() - start
 
-			const result: SealResult = {
+			const result: SEAResult = {
 				executable,
 				platform: process.platform,
 				size,
@@ -108,14 +108,14 @@ export class Seal implements SealInterface {
 		this.#emitter.destroy()
 	}
 
-	#compress(root: string): SealCompressionManifest | undefined {
+	#compress(root: string): SEACompressionManifest | undefined {
 		const compression = this.#options.compression
 		if (compression === undefined || compression.paths.length === 0) {
 			this.#emitter.emit('compress', undefined)
 			return undefined
 		}
 
-		const assets: SealCompressionManifest['assets'][number][] = []
+		const assets: SEACompressionManifest['assets'][number][] = []
 		let original = 0
 		let compressed = 0
 
@@ -131,8 +131,8 @@ export class Seal implements SealInterface {
 			compressed += manifest.total.compressed
 		}
 
-		const manifest: SealCompressionManifest = {
-			generatedAt: new Date().toISOString(),
+		const manifest: SEACompressionManifest = {
+			timestamp: new Date().toISOString(),
 			assets,
 			total: {
 				original,
@@ -192,7 +192,7 @@ export class Seal implements SealInterface {
 		if (platform.remove !== undefined) {
 			try {
 				if (process.platform === 'win32') {
-					stripPeSignature(executable)
+					stripPESignature(executable)
 				} else {
 					runShell([...platform.remove, executable])
 				}
@@ -214,12 +214,12 @@ export class Seal implements SealInterface {
 			} catch {}
 		}
 
-		if (process.platform === 'win32' && isPeExecutable(executable)) {
+		if (process.platform === 'win32' && isPEExecutable(executable)) {
 			const subsystem =
 				this.#options.windows?.subsystem === 'gui'
 					? WINDOWS_SUBSYSTEM_GUI
 					: WINDOWS_SUBSYSTEM_CONSOLE
-			patchPeSubsystem(executable, subsystem)
+			patchPESubsystem(executable, subsystem)
 		}
 
 		this.#emitter.emit('assemble', executable)

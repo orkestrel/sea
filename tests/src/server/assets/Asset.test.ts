@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Asset } from '@scsr/server'
+import { Asset } from '@src/server'
 
 describe('Asset', () => {
 	it('stores key and content from input', () => {

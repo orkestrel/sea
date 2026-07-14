@@ -15,10 +15,11 @@ import type {
 	AssetManagerEventMap,
 	AssetManagerInterface,
 	AssetManagerOptions,
-} from '../../types.js'
-import type { EmitterInterface } from '@scsr/core'
-import { Emitter } from '@scsr/core'
-import { BROTLI_EXTENSION, CLIENT_ASSET_KEY_BR, CLIENT_ASSET_KEY_RAW } from '../../constants.js'
+} from '../types.js'
+import type { EmitterInterface } from '@orkestrel/emitter'
+import { Emitter } from '@orkestrel/emitter'
+import { isArrayBuffer } from '@orkestrel/contract'
+import { BROTLI_EXTENSION, CLIENT_ASSET_KEY_BR, CLIENT_ASSET_KEY_RAW } from '../constants.js'
 
 // === AssetManager
 
@@ -30,7 +31,7 @@ export class AssetManager implements AssetManagerInterface {
 
 	constructor(options?: AssetManagerOptions) {
 		this.#root = options?.root ?? process.cwd()
-		this.#emitter = new Emitter({ on: options?.on })
+		this.#emitter = new Emitter({ on: options?.on, error: options?.error })
 		this.#loadSea()
 	}
 
@@ -77,7 +78,11 @@ export class AssetManager implements AssetManagerInterface {
 			try {
 				const raw = readFileSync(devPath, 'utf-8')
 				const encoder = new TextEncoder()
-				const content = encoder.encode(raw).buffer as ArrayBuffer
+				const bytes = encoder.encode(raw)
+				const content = bytes.buffer
+				if (!isArrayBuffer(content)) {
+					throw new Error('Failed to encode client asset')
+				}
 				this.register({ key: CLIENT_ASSET_KEY_RAW, content, compressed: false })
 				this.#emitter.emit('load', [CLIENT_ASSET_KEY_RAW])
 			} catch (thrown: unknown) {
@@ -89,10 +94,11 @@ export class AssetManager implements AssetManagerInterface {
 		if (existsSync(builtBrPath)) {
 			try {
 				const buffer = readFileSync(builtBrPath)
-				const content = buffer.buffer.slice(
-					buffer.byteOffset,
-					buffer.byteOffset + buffer.byteLength,
-				) as ArrayBuffer
+				const bufferData = buffer.buffer
+				if (!isArrayBuffer(bufferData)) {
+					throw new Error('Failed to read client asset')
+				}
+				const content = bufferData.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
 				this.register({ key: CLIENT_ASSET_KEY_BR, content, compressed: true })
 				this.#emitter.emit('load', [CLIENT_ASSET_KEY_BR])
 			} catch (thrown: unknown) {
