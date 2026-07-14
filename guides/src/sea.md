@@ -109,6 +109,7 @@ process.stdout.write(
 | `finalizeExecutable`  | function | Durably flush and atomically move a built executable into place.                |
 | `createBlobConfig`    | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
 | `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                          |
+| `openBrowser`         | function | Launch the system default browser at an http(s) URL.                            |
 | `SEAError`            | class    | The coded base error for every failure raised by the seal build.                |
 | `isSEAError`          | function | Whether a value is a `SEAError`.                                                |
 | `ShellError`          | class    | Error thrown when a shell command run via `runShell` exits non-zero.            |
@@ -209,6 +210,7 @@ import {
 	patchSentinelFuse,
 	ensureContained,
 	ensureSafeName,
+	openBrowser,
 } from '@orkestrel/sea'
 
 try {
@@ -241,6 +243,8 @@ const fd = 0 // an open file descriptor from openSync in real usage
 // patchSentinelFuse(executable, fuse)
 
 ensureContained('/dist/app', 'browser') // real, symlink-resolved path inside the base root
+
+openBrowser('http://localhost:3000') // best-effort launch of the system default browser
 ensureSafeName('myapp') // ok; throws SEAError('ASSET', ...) for '../evil' or 'a/b'
 ```
 

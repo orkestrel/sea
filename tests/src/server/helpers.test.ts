@@ -9,6 +9,7 @@ import {
 	finalizeExecutable,
 	isSEAError,
 	isShellError,
+	openBrowser,
 	runShell,
 	walkDirectory,
 } from '@src/server'
@@ -230,6 +231,39 @@ describe('helpers', () => {
 					expect(files).not.toContain('escaped.txt')
 				},
 			)
+		})
+	})
+
+	describe('openBrowser', () => {
+		// The valid-http(s)-URL spawn path is intentionally NOT exercised here —
+		// it would launch a real browser process on the test/CI machine. Only
+		// the deterministic, side-effect-free rejection paths are covered.
+
+		it('rejects an unparseable URL', () => {
+			const error = captureError(() => {
+				openBrowser('not a url')
+			})
+
+			expect(isSEAError(error) && error.code === 'BROWSER').toBe(true)
+		})
+
+		it.each(['file:///etc/passwd', 'ftp://x', 'javascript:alert(1)'])(
+			'rejects a non-http(s) scheme %s',
+			(url) => {
+				const error = captureError(() => {
+					openBrowser(url)
+				})
+
+				expect(isSEAError(error) && error.code === 'BROWSER').toBe(true)
+			},
+		)
+
+		it.each(['-e http://x', '--foo'])('rejects an argument-injection attempt %s', (value) => {
+			const error = captureError(() => {
+				openBrowser(value)
+			})
+
+			expect(isSEAError(error) && error.code === 'BROWSER').toBe(true)
 		})
 	})
 })

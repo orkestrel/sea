@@ -25,7 +25,7 @@ import {
 } from 'node:fs'
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
 import { resolve, relative, join, extname, isAbsolute, sep } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import {
 	BROTLI_EXTENSION,
 	DEFAULT_SEA_COMPRESSION_QUALITY,
@@ -635,4 +635,64 @@ export function patchSentinelFuse(executable: string, fuse: string): void {
 	} finally {
 		closeSync(fd)
 	}
+}
+
+// === Runtime Helpers
+
+/**
+ * Launch the system default browser at an http(s) URL.
+ *
+ * @remarks
+ * A best-effort launch for bundled local-UI apps: dispatches by
+ * `process.platform` (`win32` -> `rundll32 url.dll,FileProtocolHandler`,
+ * `darwin` -> `open`, else -> `xdg-open`), each invoked with an argv array
+ * (never a shell) so the URL cannot be interpreted as a flag or injected
+ * into a command line. The child process is spawned `detached` with
+ * `stdio: 'ignore'` and immediately `unref()`d so it never keeps the host
+ * app alive. Only `http:` and `https:` URLs are accepted — any other
+ * scheme (including a string that merely looks like a CLI flag, e.g.
+ * `'-e ...'`) fails to parse as an http(s) URL and is rejected before
+ * anything is spawned.
+ *
+ * @param url - Absolute http or https URL to open
+ * @throws SEAError with code `'BROWSER'` when `url` is not a parseable absolute URL
+ * @throws SEAError with code `'BROWSER'` when `url` is not an `http:`/`https:` URL
+ *
+ * @example
+ * ```ts
+ * openBrowser('http://localhost:3000')
+ * ```
+ */
+export function openBrowser(url: string): void {
+	let parsed: URL
+	try {
+		parsed = new URL(url)
+	} catch {
+		throw new SEAError('BROWSER', 'openBrowser requires a valid absolute URL', { url })
+	}
+
+	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+		throw new SEAError('BROWSER', 'openBrowser only supports http and https URLs', {
+			url,
+			protocol: parsed.protocol,
+		})
+	}
+
+	const child =
+		process.platform === 'win32'
+			? spawn('rundll32', ['url.dll,FileProtocolHandler', parsed.href], {
+					detached: true,
+					stdio: 'ignore',
+				})
+			: process.platform === 'darwin'
+				? spawn('open', [parsed.href], { detached: true, stdio: 'ignore' })
+				: spawn('xdg-open', [parsed.href], { detached: true, stdio: 'ignore' })
+
+	// Best-effort launch: if the target browser opener binary is absent, the
+	// child emits an async 'error' (ENOENT) event. There is nothing to recover
+	// here (unlike the build pipeline, there is no coded failure to surface to
+	// a caller who has already returned) — an unhandled 'error' event would
+	// otherwise crash the host app, so this is a deliberate, documented no-op.
+	child.on('error', () => {})
+	child.unref()
 }

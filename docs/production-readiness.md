@@ -20,34 +20,38 @@ for loading embedded assets at runtime via `node:sea`.
 
 - **Hide the terminal** — Windows GUI-subsystem patch (`windows.subsystem: 'gui'`). Present.
 - **Bundle larger files** — 4 MB chunked streaming injection, no in-memory size ceiling. Present.
-- **Open / close the browser** — **NOT present in this codebase.** This capability existed only
-  in stale test scaffolding inherited from an older monorepo; there is no browser-control feature
-  in `SEA`/`Injector`/`Asset`/`AssetManager`. If it is wanted, it is net-new work (and arguably
-  belongs in the consuming application, not a build tool). See "Open questions."
+- **Open the browser** — **Present.** `openBrowser(url)` is a runtime helper (not a build step)
+  that launches the system default browser at an http(s) URL — for a bundled local-UI app to
+  open its own served address. Best-effort, detached/unref'd, argv-only dispatch (no shell).
+  **Close the browser** remains **NOT present** — closing a browser tab/window is inherently
+  client-side (there is no cross-platform way for a spawned process to close a tab it opened);
+  this stays intentionally unimplemented. See "Open questions."
 
 ## Done in the hardening pass (P0/P1)
 
-| Area | What shipped |
-| --- | --- |
-| Sign-after-inject ordering | `#assemble` builds into a temp file; signing is the final content mutation on every platform; Windows subsystem patch moved before injection; verify is read-only |
-| Atomic, non-destructive output | same-dir temp + fsync + atomic rename (`finalizeExecutable`); any failure removes the temp and leaves a pre-existing output byte-intact |
-| No swallowed errors | empty strip/sign catches removed; failures surface as coded `SEAError`; `SEAResult.signed/stripped/subsystem` reflect only real outcomes |
-| Input validation | real-path (`realpathSync`) root containment for asset + compression paths (`ensureContained`) defeats symlink escape; drive-relative keys rejected; output `name` guarded |
-| Error taxonomy | `SEAError` + `SEAErrorCode` + `isSEAError`; `ShellError extends SEAError`; every throw carries a code + context |
-| Cancellation + timeout | `SEAOptions.signal`, `SEAShellOptions.timeout`/`signal`, enforced in `runShell` and checked across the pipeline |
-| Entry format | `entry: { path, format? }`; `mainFormat: 'module'` emitted for `esm`, with the `useSnapshot` incompatibility guarded |
-| Signature verification | `codesign --verify --strict` after signing on macOS, reflected in `signed` |
-| Ops | CI matrix (ubuntu/windows/macos + macos-14 arm64, Node 24/26) + a job that builds a real SEA and executes it; `SECURITY.md`; `CHANGELOG.md` |
+| Area                           | What shipped                                                                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sign-after-inject ordering     | `#assemble` builds into a temp file; signing is the final content mutation on every platform; Windows subsystem patch moved before injection; verify is read-only         |
+| Atomic, non-destructive output | same-dir temp + fsync + atomic rename (`finalizeExecutable`); any failure removes the temp and leaves a pre-existing output byte-intact                                   |
+| No swallowed errors            | empty strip/sign catches removed; failures surface as coded `SEAError`; `SEAResult.signed/stripped/subsystem` reflect only real outcomes                                  |
+| Input validation               | real-path (`realpathSync`) root containment for asset + compression paths (`ensureContained`) defeats symlink escape; drive-relative keys rejected; output `name` guarded |
+| Error taxonomy                 | `SEAError` + `SEAErrorCode` + `isSEAError`; `ShellError extends SEAError`; every throw carries a code + context                                                           |
+| Cancellation + timeout         | `SEAOptions.signal`, `SEAShellOptions.timeout`/`signal`, enforced in `runShell` and checked across the pipeline                                                           |
+| Entry format                   | `entry: { path, format? }`; `mainFormat: 'module'` emitted for `esm`, with the `useSnapshot` incompatibility guarded                                                      |
+| Signature verification         | `codesign --verify --strict` after signing on macOS, reflected in `signed`                                                                                                |
+| Ops                            | CI matrix (ubuntu/windows/macos + macos-14 arm64, Node 24/26) + a job that builds a real SEA and executes it; `SECURITY.md`; `CHANGELOG.md`                               |
 
 ## Roadmap (not yet done)
 
 ### P1 — publishing/supply-chain hardening
+
 - **npm provenance / OIDC trusted publishing.** Add `publish.yml` with `permissions: id-token: write`
   and `npm publish --provenance`. Currently documented as a follow-up in `SECURITY.md`, not implemented.
 - **API report gate.** `@microsoft/api-extractor` is already a devDependency; wire an `api.md`
   report + a check so public-surface changes are reviewed. (Pre-1.0 the surface is still moving.)
 
 ### P2 — differentiators
+
 - **Reproducible builds.** Parameterize/drop the `new Date().toISOString()` in the compression
   manifest so output is byte-stable given fixed inputs; document that the host `node` binary and the
   V8 code cache remain reproducibility-breaking inputs.
@@ -56,9 +60,10 @@ for loading embedded assets at runtime via `node:sea`.
 - **Progress / logging hooks** beyond the coarse `compress`/`blob`/`assemble` events.
 - **Compatibility + troubleshooting docs.** Per-OS/arch/Node support table; AV/EDR false-positive
   guidance (Node SEA clones are increasingly flagged); migration notes from `postject`/`pkg`/`bun
-  compile`; an "embedded local-UI" example using `AssetManager`'s `client.html` conventions.
+compile`; an "embedded local-UI" example using `AssetManager`'s `client.html` conventions.
 
 ### Residuals from the security review (accepted for now)
+
 - **Point-of-use TOCTOU.** Containment is enforced at `#validate` time via real paths; a symlink
   swapped between validate and use is not re-checked. Acceptable for a local build tool operating on
   the invoker's own inputs; close it by re-checking `ensureContained` at the point of use if this is
@@ -104,8 +109,9 @@ for loading embedded assets at runtime via `node:sea`.
 
 ## Open questions for the maintainer
 
-1. **Browser open/close** — do you want this added (net-new feature), or was it a mis-remembered
-   capability? It is not in the current code.
+1. **Browser open/close** — `openBrowser(url)` is now implemented (open only). Closing a
+   browser tab/window remains intentionally unimplemented — it is inherently client-side and
+   arguably belongs in the served UI itself, not a server-side helper.
 2. **Windows signing** — first-class support (a `sign` override), or keep it consumer-owned?
 3. **ESM floor** — raise `engines.node` to `>= 25.7` for a first-class ESM story, or keep `>= 24`
    with ESM as best-effort?

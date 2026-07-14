@@ -254,6 +254,7 @@ export type SEAStatus = 'idle' | 'active' | 'done' | 'error'
  * `ABORT`    — operation aborted via `AbortSignal`.
  * `OUTPUT`   — final executable write/finalize failure.
  * `STATE`    — invalid internal state or argument.
+ * `BROWSER`  — invalid or unsupported URL passed to `openBrowser`.
  */
 export type SEAErrorCode =
 	| 'PLATFORM'
@@ -269,6 +270,7 @@ export type SEAErrorCode =
 	| 'ABORT'
 	| 'OUTPUT'
 	| 'STATE'
+	| 'BROWSER'
 
 /**
  * SEA entry point module format.

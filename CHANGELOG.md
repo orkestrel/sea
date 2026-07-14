@@ -12,6 +12,9 @@ once it leaves pre-release.
 
 - `SEAError` coded error taxonomy with a machine-readable `SEAErrorCode`, plus the
   `isSEAError` type guard.
+- `openBrowser` helper — launch the system default browser at an http(s) URL (for
+  bundled local-UI apps), surfacing `SEAErrorCode` `'BROWSER'` for an invalid or
+  non-http(s) URL.
 - `AbortSignal` and `timeout` support for shell-boundary operations, surfacing
   `SEAErrorCode` `'ABORT'` and `'TIMEOUT'`.
 - SEA entry point module format selection — `cjs` (default) and `esm` (Node >= 25.7)
