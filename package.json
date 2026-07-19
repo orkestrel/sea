@@ -62,7 +62,7 @@
 		"build:src": "npm run build:src:server",
 		"build:src:server": "vite build --config configs/src/vite.server.config.ts && npm run copy dist/src/server/index.d.ts dist/src/server/index.d.cts",
 		"prepublishOnly": "npm run format:check && npm run lint:check && npm run check && npm run build && npm test",
-		"scaffold": "bash scripts/scaffold.sh"
+		"scaffold": "scaffold"
 	},
 	"dependencies": {
 		"@orkestrel/contract": "^0.0.5",
