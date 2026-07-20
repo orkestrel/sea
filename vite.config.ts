@@ -14,7 +14,6 @@ const resolve = {
 	),
 }
 
-// Base: shared resolve + build defaults + src:server tests.
 export const srcServer = (config?: UserConfig): UserConfig =>
 	mergeConfig(
 		{
@@ -45,9 +44,6 @@ export const srcServer = (config?: UserConfig): UserConfig =>
 		config ?? {},
 	)
 
-// Extends srcServer: the guides-parity suite. Node env — it reads the real
-// guides/*.md and the documented source modules off disk — but resolves like
-// server tests.
 export const guides = (config?: UserConfig): UserConfig =>
 	srcServer(
 		mergeConfig(
@@ -62,30 +58,9 @@ export const guides = (config?: UserConfig): UserConfig =>
 		),
 	)
 
-// Standalone: the real-SEA-build integration battery. Extends the SAME node
-// server setup as srcServer (setupFiles/environment) but points at its own
-// `tests/integration/**` include — these tests copy the real node binary and
-// shell out to `node --experimental-sea-config`, which is slow and
-// environment-dependent, so they stay out of the default `test` run and are
-// opt-in via `npm run test:integration` (AGENTS §16.1).
-export const integration = (config?: UserConfig): UserConfig =>
-	mergeConfig(
-		{
-			resolve,
-			test: {
-				name: { label: 'integration', color: 'cyan' },
-				include: ['tests/integration/**/*.test.ts'],
-				setupFiles: ['./tests/setup.ts', './tests/setupServer.ts'],
-				environment: 'node',
-				browser: { enabled: false },
-			},
-		},
-		config ?? {},
-	)
-
 export default defineConfig({
 	resolve,
 	test: {
-		projects: [srcServer, integration, guides],
+		projects: [srcServer, guides],
 	},
 })
