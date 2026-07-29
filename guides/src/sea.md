@@ -97,6 +97,7 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `isCompressible`      | function | Check if a file should be Brotli-compressed based on its extension.             |
 | `walkDirectory`       | function | Recursively walk a directory and return all file paths.                         |
 | `runShell`            | function | Run a command synchronously and return stdout; throws `ShellError`.             |
+| `redactCommand`       | function | Redact a shell command's arguments for safe inclusion in error messages.        |
 | `computeSize`         | function | Compute a size comparison between original and compressed byte counts.          |
 | `compressFile`        | function | Brotli-compress a single file, writing the output alongside it.                 |
 | `compressDirectory`   | function | Compress all compressible files in a directory tree.                            |
@@ -116,6 +117,8 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `createBlobConfig`    | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
 | `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                          |
 | `buildELFNoteHeader`  | function | Build an ELF `PT_NOTE` entry's header bytes for the SEA blob note.              |
+| `alignELFNoteSize`    | function | Round an ELF note payload size up to its four-byte alignment boundary.          |
+| `isPowerOfTwo`        | function | Whether a positive integer is an exact power of two.                            |
 | `copyRange`           | function | Stream a byte range between two file descriptors in fixed-size chunks.          |
 | `openBrowser`         | function | Launch the system default browser at an http(s) URL.                            |
 | `SEAError`            | class    | The coded base error for every failure raised by the seal build.                |
