@@ -238,6 +238,7 @@ manager.destroy()
 ```ts
 import {
 	runShell,
+	redactCommand,
 	isShellError,
 	platformConfig,
 	isPlatformSupported,
@@ -261,6 +262,8 @@ import {
 	openBrowser,
 	createSignCommand,
 	syncDirectory,
+	alignELFNoteSize,
+	isPowerOfTwo,
 } from '@orkestrel/sea'
 
 try {
@@ -301,6 +304,10 @@ createSignCommand({ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' }, 'd
 // ['signtool', 'sign', '/fd', 'sha256', '/sha1', 'AABBCCDDEEFF00112233445566778899AABBCCDD', 'dist/sea/app.exe']
 
 syncDirectory('/dist/sea') // fsync a directory to durably persist a prior rename/create; no-op on win32
+
+redactCommand(['signtool', 'sign', '/p', 'hunter2']) // ['signtool', 'sign', '/p', '***']
+alignELFNoteSize(10) // 12 — the next four-byte ELF note boundary
+isPowerOfTwo(4096) // true
 ```
 
 ## See also
