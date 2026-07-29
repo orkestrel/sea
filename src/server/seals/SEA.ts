@@ -64,7 +64,10 @@ export class SEA implements SEAInterface {
 
 	constructor(options: SEAOptions) {
 		this.#options = options
-		this.#emitter = new Emitter({ on: options.on, error: options.error })
+		this.#emitter = new Emitter({
+			...(options.on === undefined ? {} : { on: options.on }),
+			...(options.error === undefined ? {} : { error: options.error }),
+		})
 	}
 
 	get emitter(): EmitterInterface<SEAEventMap> {
@@ -117,10 +120,10 @@ export class SEA implements SEAInterface {
 				platform: process.platform,
 				size,
 				duration,
-				compression,
 				signed: assembled.signed,
 				stripped: assembled.stripped,
-				terminal: assembled.terminal,
+				...(compression === undefined ? {} : { compression }),
+				...(assembled.terminal === undefined ? {} : { terminal: assembled.terminal }),
 			}
 
 			this.#status = 'done'
@@ -238,7 +241,10 @@ export class SEA implements SEAInterface {
 		const configPath = join(output, 'sea-config.json')
 		const blob = join(output, 'sea-prep.blob')
 		const config = createBlobConfig(
-			{ path: entry, format: this.#options.entry.format },
+			{
+				path: entry,
+				...(this.#options.entry.format === undefined ? {} : { format: this.#options.entry.format }),
+			},
 			blob,
 			this.#assets(root),
 			this.#options.blob,
@@ -247,7 +253,7 @@ export class SEA implements SEAInterface {
 		writeFileSync(configPath, JSON.stringify(config, null, 2))
 		runShell([process.execPath, '--experimental-sea-config', configPath], {
 			cwd: output,
-			signal: this.#options.signal,
+			...(this.#options.signal === undefined ? {} : { signal: this.#options.signal }),
 		})
 
 		if (!existsSync(blob)) {
@@ -278,6 +284,7 @@ export class SEA implements SEAInterface {
 		const name = process.platform === 'win32' ? `${this.#options.name}.exe` : this.#options.name
 		const finalOutput = join(output, name)
 		const temp = join(output, `.${this.#options.name}-${randomUUID()}.tmp${ext}`)
+		const shell = this.#options.signal === undefined ? {} : { signal: this.#options.signal }
 
 		let signed = false
 		let stripped = false
@@ -292,7 +299,7 @@ export class SEA implements SEAInterface {
 				if (platform.remove !== undefined) {
 					this.#check()
 					try {
-						runShell([...platform.remove, temp], { signal: this.#options.signal })
+						runShell([...platform.remove, temp], shell)
 					} catch (thrown: unknown) {
 						throw new SEAError('SIGN', 'Failed to strip existing signature', {
 							cause: thrown instanceof Error ? thrown.message : String(thrown),
@@ -314,7 +321,7 @@ export class SEA implements SEAInterface {
 				if (platform.sign !== undefined) {
 					this.#check()
 					try {
-						runShell([...platform.sign, temp], { signal: this.#options.signal })
+						runShell([...platform.sign, temp], shell)
 					} catch (thrown: unknown) {
 						throw new SEAError('SIGN', 'Failed to sign executable', {
 							cause: thrown instanceof Error ? thrown.message : String(thrown),
@@ -324,7 +331,7 @@ export class SEA implements SEAInterface {
 					if (platform.verify !== undefined) {
 						this.#check()
 						try {
-							runShell([...platform.verify, temp], { signal: this.#options.signal })
+							runShell([...platform.verify, temp], shell)
 						} catch (thrown: unknown) {
 							throw new SEAError('SIGN', 'Signature verification failed', {
 								cause: thrown instanceof Error ? thrown.message : String(thrown),
@@ -367,7 +374,7 @@ export class SEA implements SEAInterface {
 						sign.file !== undefined ? { ...sign, file: resolve(root, sign.file) } : sign
 					const signArgs = createSignCommand(signInput, temp)
 					try {
-						runShell(signArgs, { signal: this.#options.signal })
+						runShell(signArgs, shell)
 					} catch {
 						throw new SEAError('SIGN', 'Windows signing failed', { executable: temp })
 					}
@@ -376,7 +383,7 @@ export class SEA implements SEAInterface {
 					if (platform.verify !== undefined) {
 						this.#check()
 						try {
-							runShell([...platform.verify, temp], { signal: this.#options.signal })
+							runShell([...platform.verify, temp], shell)
 						} catch {
 							throw new SEAError('SIGN', 'Signature verification failed', { executable: temp })
 						}
@@ -404,7 +411,12 @@ export class SEA implements SEAInterface {
 		}
 
 		this.#emitter.emit('assemble', finalOutput)
-		return { executable: finalOutput, signed, stripped, terminal }
+		return {
+			executable: finalOutput,
+			signed,
+			stripped,
+			...(terminal === undefined ? {} : { terminal }),
+		}
 	}
 
 	#assets(root: string): Readonly<Record<string, string>> {

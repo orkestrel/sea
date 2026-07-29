@@ -115,9 +115,9 @@ export function createInjectorOptions(options: {
 		executable: options.executable,
 		resource: options.resource ?? 'NODE_SEA_BLOB',
 		blob: options.blob,
-		fuse: options.fuse,
-		overwrite: options.overwrite,
-		macho: options.macho,
+		...(options.fuse === undefined ? {} : { fuse: options.fuse }),
+		...(options.overwrite === undefined ? {} : { overwrite: options.overwrite }),
+		...(options.macho === undefined ? {} : { macho: options.macho }),
 	}
 }
 

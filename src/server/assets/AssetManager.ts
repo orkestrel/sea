@@ -32,7 +32,10 @@ export class AssetManager implements AssetManagerInterface {
 
 	constructor(options?: AssetManagerOptions) {
 		this.#root = options?.root ?? process.cwd()
-		this.#emitter = new Emitter({ on: options?.on, error: options?.error })
+		this.#emitter = new Emitter({
+			...(options?.on === undefined ? {} : { on: options.on }),
+			...(options?.error === undefined ? {} : { error: options.error }),
+		})
 		this.#loadSea()
 	}
 

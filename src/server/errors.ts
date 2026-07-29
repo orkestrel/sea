@@ -33,7 +33,9 @@ export class SEAError extends Error {
 		super(message)
 		this.name = 'SEAError'
 		this.code = code
-		this.context = context
+		if (context !== undefined) {
+			this.context = context
+		}
 	}
 }
 

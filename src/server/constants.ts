@@ -121,8 +121,6 @@ export const PE_SCN_MEM_READ = 0x40000000
 export const SEA_PLATFORMS: Readonly<Record<string, SEAPlatform>> = Object.freeze({
 	win32: Object.freeze({
 		executable: 'node.exe',
-		remove: undefined,
-		sign: undefined,
 		verify: Object.freeze(['signtool', 'verify', '/pa']),
 	}),
 	darwin: Object.freeze({
@@ -133,9 +131,6 @@ export const SEA_PLATFORMS: Readonly<Record<string, SEAPlatform>> = Object.freez
 	}),
 	linux: Object.freeze({
 		executable: 'node',
-		remove: undefined,
-		sign: undefined,
-		verify: undefined,
 	}),
 })
 
