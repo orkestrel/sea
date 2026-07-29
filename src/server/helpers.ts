@@ -133,6 +133,23 @@ export function walkDirectory(directory: string, base?: string): readonly string
 // === Shell Helpers
 
 /**
+ * Redact password arguments from a shell command.
+ *
+ * @param command - Command arguments to redact
+ * @returns A copy with values following password flags replaced by a marker
+ */
+export function redactCommand(command: readonly string[]): readonly string[] {
+	const secretFlags = new Set(['/p', '-p', '--password'])
+	return command.map((token, index) => {
+		const previous = command[index - 1]
+		if (previous !== undefined && secretFlags.has(previous.toLowerCase())) {
+			return '***'
+		}
+		return token
+	})
+}
+
+/**
  * Run a command synchronously and return stdout.
  *
  * @param command - Command to execute (first element is the binary)
@@ -144,21 +161,6 @@ export function walkDirectory(directory: string, base?: string): readonly string
  * @throws ShellError when the command exits with non-zero status
  */
 export function runShell(command: string[], options?: SEAShellOptions): Buffer {
-	// Replace the argv element following a `/p`, `-p`, or `--password` flag
-	// (case-insensitive) with a redaction marker, so a secret passed as a
-	// discrete argv token (e.g. `signtool /p <password>`) can never leak into
-	// an error message or SEAError context, regardless of caller.
-	function redactCommand(argv: string[]): string[] {
-		const secretFlags = new Set(['/p', '-p', '--password'])
-		return argv.map((token, index) => {
-			const previous = argv[index - 1]
-			if (previous !== undefined && secretFlags.has(previous.toLowerCase())) {
-				return '***'
-			}
-			return token
-		})
-	}
-
 	const [cmd, ...args] = command
 	if (cmd === undefined) {
 		throw new SEAError('STATE', 'Command array must not be empty')
@@ -295,6 +297,16 @@ export function compressDirectory(
 }
 
 // === PE Helpers
+
+/**
+ * Check whether a number is a nonzero power of two.
+ *
+ * @param value - Number to check
+ * @returns True when the value is a positive power of two
+ */
+export function isPowerOfTwo(value: number): boolean {
+	return value > 0 && (value & (value - 1)) === 0
+}
 
 /**
  * Parse the PE header offset from a Windows executable.
@@ -778,6 +790,17 @@ export function createBlobConfig(
 // === ELF Helpers
 
 /**
+ * Align an ELF note component size to its four-byte boundary.
+ *
+ * @param value - Component size to align
+ * @returns The value rounded up to the next multiple of four
+ */
+export function alignELFNoteSize(value: number): number {
+	const remainder = value % 4
+	return remainder === 0 ? value : value + (4 - remainder)
+}
+
+/**
  * Build an ELF `PT_NOTE` entry's header bytes (namesz/descsz/type + padded
  * name) for the SEA blob note, without the blob body itself.
  *
@@ -804,13 +827,8 @@ export function buildELFNoteHeader(
 	resource: string,
 	blobSize: number,
 ): { readonly header: Buffer; readonly entryTotal: number } {
-	const alignTo4 = (value: number): number => {
-		const remainder = value % 4
-		return remainder === 0 ? value : value + (4 - remainder)
-	}
-
 	const nameBytes = Buffer.from(`${resource}\0`, 'utf-8')
-	const alignedNameSize = alignTo4(nameBytes.length)
+	const alignedNameSize = alignELFNoteSize(nameBytes.length)
 
 	const header = Buffer.alloc(12 + alignedNameSize)
 	header.writeUInt32LE(nameBytes.length, 0) // namesz
@@ -818,7 +836,7 @@ export function buildELFNoteHeader(
 	header.writeUInt32LE(0, 8) // type
 	nameBytes.copy(header, 12)
 
-	const alignedDescSize = alignTo4(blobSize)
+	const alignedDescSize = alignELFNoteSize(blobSize)
 	return { header, entryTotal: header.length + alignedDescSize }
 }
 

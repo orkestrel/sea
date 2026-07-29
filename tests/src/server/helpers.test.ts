@@ -11,6 +11,7 @@ import {
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+	alignELFNoteSize,
 	buildELFNoteHeader,
 	compressDirectory,
 	compressFile,
@@ -24,6 +25,7 @@ import {
 	finalizeExecutable,
 	formatSize,
 	isPEExecutable,
+	isPowerOfTwo,
 	isSEAError,
 	isShellError,
 	openBrowser,
@@ -31,6 +33,7 @@ import {
 	patchPESubsystem,
 	patchSentinelFuse,
 	readU16,
+	redactCommand,
 	runShell,
 	stripPESignature,
 	syncDirectory,
@@ -41,6 +44,22 @@ import { buildPeFixture, withTestDir } from '../../setupServer.js'
 import { captureError } from '../../setup.js'
 
 describe('helpers', () => {
+	describe('redactCommand', () => {
+		it('redacts values following case-insensitive password flags without mutating the input', () => {
+			const command = ['signtool', '/P', 'secret', '--password', 'other', 'target.exe']
+
+			expect(redactCommand(command)).toEqual([
+				'signtool',
+				'/P',
+				'***',
+				'--password',
+				'***',
+				'target.exe',
+			])
+			expect(command).toEqual(['signtool', '/P', 'secret', '--password', 'other', 'target.exe'])
+		})
+	})
+
 	describe('runShell', () => {
 		it('returns stdout on success', () => {
 			const stdout = runShell([process.execPath, '-e', "process.stdout.write('ok')"])
@@ -999,6 +1018,30 @@ describe('helpers', () => {
 			expect(header.length).toBe(12 + 4)
 			// blobSize 10 aligns up to 12
 			expect(entryTotal).toBe(header.length + 12)
+		})
+	})
+
+	describe('alignELFNoteSize', () => {
+		it.each([
+			[0, 0],
+			[1, 4],
+			[4, 4],
+			[5, 8],
+		])('aligns %i to %i bytes', (value, expected) => {
+			expect(alignELFNoteSize(value)).toBe(expected)
+		})
+	})
+
+	describe('isPowerOfTwo', () => {
+		it.each([
+			[-2, false],
+			[0, false],
+			[1, true],
+			[2, true],
+			[3, false],
+			[1024, true],
+		])('classifies %i as %s', (value, expected) => {
+			expect(isPowerOfTwo(value)).toBe(expected)
 		})
 	})
 })

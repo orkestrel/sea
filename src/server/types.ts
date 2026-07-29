@@ -189,10 +189,10 @@ export interface AssetInterface {
 
 /** Events emitted by an {@link AssetManagerInterface}. */
 export type AssetManagerEventMap = {
-	register: readonly [asset: AssetInterface]
-	load: readonly [keys: readonly string[]]
-	clear: readonly []
-	error: readonly [error: unknown]
+	readonly register: readonly [asset: AssetInterface]
+	readonly load: readonly [keys: readonly string[]]
+	readonly clear: readonly []
+	readonly error: readonly [error: unknown]
 }
 
 /**
@@ -303,12 +303,12 @@ export interface SEABlobOptions {
 
 /** Events emitted by a {@link SEAInterface}. */
 export type SEAEventMap = {
-	compress: readonly [compression: SEACompressionManifest | undefined]
-	progress: readonly [progress: SEAProgress]
-	blob: readonly [blob: string]
-	assemble: readonly [executable: string]
-	complete: readonly [result: SEAResult]
-	error: readonly [error: unknown]
+	readonly compress: readonly [compression: SEACompressionManifest | undefined]
+	readonly progress: readonly [progress: SEAProgress]
+	readonly blob: readonly [blob: string]
+	readonly assemble: readonly [executable: string]
+	readonly complete: readonly [result: SEAResult]
+	readonly error: readonly [error: unknown]
 }
 
 /**

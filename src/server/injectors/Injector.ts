@@ -44,7 +44,13 @@ import {
 	MACHO_MAGIC_64,
 	MACHO_LC_SEGMENT_64,
 } from '../constants.js'
-import { patchSentinelFuse, buildELFNoteHeader, finalizeExecutable, copyRange } from '../helpers.js'
+import {
+	patchSentinelFuse,
+	buildELFNoteHeader,
+	finalizeExecutable,
+	copyRange,
+	isPowerOfTwo,
+} from '../helpers.js'
 import { SEAError } from '../errors.js'
 
 // === Injector
@@ -1638,34 +1644,18 @@ export class Injector implements InjectorInterface {
 		threshold: number,
 		shift: number,
 	): void {
-		const bump = (fieldOffset: number): void => {
-			if (fieldOffset + 4 > buf.length) return
-			const value = buf.readUInt32LE(fieldOffset)
-			if (value >= threshold && value > 0) {
-				buf.writeUInt32LE(value + shift, fieldOffset)
-			}
-		}
-		const base = cmd.offset
+		let offsets: readonly number[]
 		switch (cmd.type) {
 			case 0x2: // LC_SYMTAB: symoff@+8, stroff@+16
-				bump(base + 8)
-				bump(base + 16)
+				offsets = [8, 16]
 				break
 			case 0xb: // LC_DYSYMTAB: tocoff/modtaboff/extrefsymoff/indirectsymoff/extreloff/locreloff
-				bump(base + 32)
-				bump(base + 40)
-				bump(base + 48)
-				bump(base + 56)
-				bump(base + 64)
-				bump(base + 72)
+				offsets = [32, 40, 48, 56, 64, 72]
 				break
 			case 0x22: // LC_DYLD_INFO
 			case 0x80000022: // LC_DYLD_INFO_ONLY
-				bump(base + 8) // rebase_off
-				bump(base + 16) // bind_off
-				bump(base + 24) // weak_bind_off
-				bump(base + 32) // lazy_bind_off
-				bump(base + 40) // export_off
+				// rebase_off, bind_off, weak_bind_off, lazy_bind_off, export_off
+				offsets = [8, 16, 24, 32, 40]
 				break
 			case 0x1d: // LC_CODE_SIGNATURE
 			case 0x1e: // LC_SEGMENT_SPLIT_INFO
@@ -1673,13 +1663,21 @@ export class Injector implements InjectorInterface {
 			case 0x29: // LC_DATA_IN_CODE
 			case 0x80000033: // LC_DYLD_EXPORTS_TRIE
 			case 0x80000034: // LC_DYLD_CHAINED_FIXUPS
-				bump(base + 8) // dataoff (linkedit_data_command)
+				offsets = [8] // dataoff (linkedit_data_command)
 				break
 			default:
 				// LC_TWOLEVEL_HINTS (0x16, offset@+8) and LC_ATOM_INFO also
 				// point into __LINKEDIT but are intentionally not handled here
 				// because they do not appear in Node.js executables.
-				break
+				return
+		}
+		for (const offset of offsets) {
+			const fieldOffset = cmd.offset + offset
+			if (fieldOffset + 4 > buf.length) continue
+			const value = buf.readUInt32LE(fieldOffset)
+			if (value >= threshold && value > 0) {
+				buf.writeUInt32LE(value + shift, fieldOffset)
+			}
 		}
 	}
 
@@ -1789,7 +1787,6 @@ export class Injector implements InjectorInterface {
 	// output via NaN -> #writeU32 coercion. ---
 
 	#ensureValidPEAlignment(sectionAlignment: number, fileAlignment: number): void {
-		const isPowerOfTwo = (n: number): boolean => n > 0 && (n & (n - 1)) === 0
 		if (!isPowerOfTwo(sectionAlignment) || !isPowerOfTwo(fileAlignment)) {
 			throw new SEAError('FORMAT', 'PE section/file alignment must be a nonzero power of two', {
 				executable: this.#options.executable,
