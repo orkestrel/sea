@@ -187,10 +187,12 @@ environment contributes, its test-project label, and — on the `src` axis — i
 and build formats, or — on the `app` axis — its optional runtime entry.
 
 `ViteMachinery` names the three host-specific pipelines a workspace's generated `vite.config.ts` may
-carry: `browser` for the CSS pipeline and the Playwright-backed browser test project, `vue` for the
+carry: `browser` selects the shared root CSS-analysis and Playwright machinery, `vue` selects the
 single-file-component, HTML, and development-server machinery an application browser environment
-needs, and `output` for build-output containment. It never selects a boundary guarantee — those ship
-in every shape, as the compilers section sets out.
+needs, and `output` selects build-output containment. The root machinery selection never attaches a
+`css` property to a nonbrowser project: only the `srcBrowser` and `appBrowser` factories own
+`ENVIRONMENT_CSS`. It never selects a boundary guarantee — those ship in every shape, as the
+compilers section sets out.
 
 `ViteFacts` is the optional structural-fact slice shared by every root Vite compiler:
 `bin`, `integration`, and `service` each select their matching standalone project when `true`;
@@ -288,7 +290,8 @@ the accumulated `questions`, one `CompileRecord` per stage, any `CompileFailure`
 `GuideSync`, `VersionSync`, and `SyncReport` are the freshness shapes. `GuideSync` carries the
 fetched `content`, its `freshness`, an optional `note` explaining a non-clean outcome, and an
 optional `baseline` — the SHA-256 of the observed local mirror, or the literal `absent`, present
-only on target-aware pulls. `VersionSync` compares a declared `range` to the registry `latest`.
+only on target-aware synchronization. `VersionSync` compares a declared `range` to the registry
+`latest`.
 `SyncReport` is `clean` only when nothing drifted and nothing failed. `CatalogEntry` is one fleet
 package row; its `description` is the flattened text of that package's own guide's first
 blockquote, and the empty string when that guide is missing, unreadable, or carries no blockquote.
@@ -317,6 +320,7 @@ From [`types.ts`](../../src/server/types.ts).
 | `CatalogAllowance`      | type      |
 | `SyncBase`              | type      |
 | `SyncBranch`            | type      |
+| `VersionLookup`         | type      |
 | `GuideWrite`            | interface |
 | `MaterializerInterface` | interface |
 | `SyncEventMap`          | type      |
@@ -344,7 +348,9 @@ identity, and `WriteDirectoryResult` pairs the final anchor with the subset a ca
 `CatalogAllowance` are one-cell `Float64Array` allowances: the former shares a byte budget across
 concurrent network readers, while the latter shares one entry budget across every fleet root and
 child visited by a catalog operation. `SyncBase` and `SyncBranch` are normalized strings returned
-only by their corresponding boundary parsers.
+only by their corresponding boundary parsers. `VersionLookup` is the bare-name registry result:
+a successful lookup carries `latest` with `freshness: 'behind'` because no declared range was
+supplied as a reference, while `missing` and `failed` carry a `note` and no invented version.
 
 `SyncOptions` groups the injectable endpoints under the entity they configure — `guides` with
 `base`, `branch`, and `timeout`; `registry` with `base` and `timeout` — alongside `concurrency`,
@@ -449,7 +455,10 @@ form. `HEX_PATTERN` requires whole lowercase byte pairs, and `SYNC_BASELINE_PATT
 `0.0.1`. `BASE_DEV_DEPENDENCIES` is the host-neutral tooling baseline every generated workspace
 gets; `SOURCE_BROWSER_DEV_DEPENDENCIES` adds the real browser providers a published browser environment
 needs, and `APP_BROWSER_DEV_DEPENDENCIES` extends that with the Vue toolchain a private browser
-application needs. `SCAFFOLD_RANGE` is the range generated workspaces pin this package at.
+application needs. Vite is minor-pinned at `~8.2.0`: the generated boundary consumes the reviewed
+8.2 `CSSOptions`, `preprocessCSS`, and `isCSSRequest` surface, while the selected
+`css.transformer` / `lightningcss` path is experimental and must not float into an unreviewed minor.
+`SCAFFOLD_RANGE` is the range generated workspaces pin this package at.
 `CHECKOUT_ACTION_SHA` and `SETUP_NODE_ACTION_SHA` pin the two official CI actions to immutable
 commits. `TYPESCRIPT_EXTENSIONS` is the module extension set every generated scoped check covers.
 `JSON_PRINT_WIDTH` and `JSON_TAB_WIDTH` mirror the formatter configuration, so computed JSON is
@@ -684,6 +693,7 @@ From [`parsers.ts`](../../src/server/parsers.ts).
 | Name                       | Kind     |
 | -------------------------- | -------- |
 | `parseSyncDependencies`    | function |
+| `parseSyncNames`           | function |
 | `parseFilesystemPaths`     | function |
 | `parsePortablePaths`       | function |
 | `parseWritePreconditions`  | function |
@@ -703,7 +713,9 @@ subset used in raw-guide URLs: it rejects overlong values, empty or dot-leading 
 `@{`, the single `@`, trailing dots, and `.lock` suffixes without regard to case.
 `parseSyncCurrent` snapshots only the declared guide references, enforcing both the per-file and
 cumulative byte allowance. The three array parsers return frozen copies read through property
-descriptors, so a caller-supplied array can never smuggle in a getter.
+descriptors, so a caller-supplied array can never smuggle in a getter. `parseSyncNames` snapshots a
+bounded dense array of unique npm package names and validates only the names; declaration ranges
+remain the responsibility of `parseSyncDependencies` and the blueprint gate.
 
 ### Shapers — core
 
@@ -1003,7 +1015,7 @@ error.
 
 `packageShortName` strips the canonical scope, `guideStub` renders the pointer written when a
 dependency guide is not vendored yet, `readGuideReferences` reads a target's existing local mirrors
-so a pull's verdicts are target-relative, and `syncReportOf` assembles one report from already
+for package names so synchronization verdicts are target-relative, and `syncReportOf` assembles one report from already
 ordered guide and version outcomes.
 
 ### Compilers — core
@@ -1081,8 +1093,9 @@ streams, `URL`, `AbortController`, the text encoders, `crypto`, timers, `console
 is one declaration set for a host-independent module, not a host. `viteHeader` renders the shared
 header — the alias block
 derived from the tsconfig paths, plus the environment-boundary plugin — and `viteMachinery` is the
-one place the header's axes are derived, read by `rootViteConfig`, `singleSrcViteConfig`,
-`applicationViteConfig`, and `configArtifacts` alike so no caller can invent a fourth answer.
+one place the root header's axes are derived, read by `rootViteConfig`, `singleSrcViteConfig`, and
+`applicationViteConfig`; `configArtifacts` delegates to those roots rather than deriving another
+answer.
 
 **The boundary guarantees do not vary by blueprint.** Every generated `vite.config.ts` — a
 `core`-only library, an application of `app/core` alone, or the full six-environment workspace —
@@ -1095,12 +1108,12 @@ module graph never records — has no other enforcement point in workspace-owned
 and toolchain modules are outside that ownership boundary. Only host-specific pipelines vary,
 along the three `ViteMachinery` axes:
 
-| Machinery                                                         | Emitted when                         |
-| ----------------------------------------------------------------- | ------------------------------------ |
-| CSS pipeline (`ENVIRONMENT_CSS`, `preprocessCSS`, `isCSSRequest`) | a `src` or `app` browser environment |
-| Playwright provider and `hasChromium`                             | a `src` or `app` browser environment |
-| Vue plugin, HTML boundary, browser development server             | an `app` browser environment         |
-| Output containment (`outputBoundary`, `enforceOutputPath`)        | anything the workspace builds        |
+| Machinery                                                                | Emitted when                         |
+| ------------------------------------------------------------------------ | ------------------------------------ |
+| Shared CSS analysis (`ENVIRONMENT_CSS`, `preprocessCSS`, `isCSSRequest`) | a `src` or `app` browser environment |
+| Playwright provider and managed/system browser discovery                 | a `src` or `app` browser environment |
+| Vue plugin, HTML boundary, browser development server                    | an `app` browser environment         |
+| Output containment (`outputBoundary`, `enforceOutputPath`)               | anything the workspace builds        |
 
 An application of `app/core` alone is the sole shape that builds nothing, so it is the sole shape
 without output containment — and it still carries every boundary guarantee above.
@@ -1120,7 +1133,9 @@ slice carries `global` to integration and the source-browser compiler without ad
 project.
 
 `coreViteConfig`, `srcViteConfig`, `binViteConfig`, and `appViteConfig` emit the thin per-target
-wrappers, while `binTsconfig` emits the executable declaration scope; `rootViteConfig`,
+wrappers. `coreViteConfig()` is parameterless and never imports or attaches browser CSS machinery;
+the root `srcCore` factory and its wrapper stay host-independent even when the workspace also owns a
+browser target. `binTsconfig` emits the executable declaration scope; `rootViteConfig`,
 `singleSrcViteConfig`, and `applicationViteConfig` emit the root configuration for a library-only,
 single non-core `src` environment, and application-bearing workspace respectively; and
 `policyViteProject`, `guidesViteProject`, `integrationViteProject`, and `serviceViteProject` emit
@@ -1282,16 +1297,19 @@ The interface also exposes the readonly `emitter`.
 
 #### `SyncInterface`
 
-| Method     | Returns                            |
-| ---------- | ---------------------------------- |
-| `guides`   | `Promise<readonly GuideSync[]>`    |
-| `versions` | `Promise<readonly VersionSync[]>`  |
-| `catalog`  | `Promise<readonly CatalogEntry[]>` |
-| `pull`     | `Promise<SyncReport>`              |
-| `write`    | `Promise<readonly string[]>`       |
-| `destroy`  | `void`                             |
+| Method     | Returns                             |
+| ---------- | ----------------------------------- |
+| `lookup`   | `Promise<readonly VersionLookup[]>` |
+| `guides`   | `Promise<readonly GuideSync[]>`     |
+| `versions` | `Promise<readonly VersionSync[]>`   |
+| `catalog`  | `Promise<readonly CatalogEntry[]>`  |
+| `pull`     | `Promise<SyncReport>`               |
+| `mirror`   | `Promise<SyncReport>`               |
+| `write`    | `Promise<readonly string[]>`        |
+| `destroy`  | `void`                              |
 
-`guides(deps, current?)` fetches each dependency's upstream guide. The optional `current` map is
+`lookup(names)` resolves registry versions from bare package names, with no declaration range
+required or synthesized. `guides(deps, current?)` fetches each dependency's upstream guide. The optional `current` map is
 keyed by dependency name: with it, a fetched guide byte-equal to its entry verdicts `current` and
 anything else verdicts `behind`; without it, every successful fetch verdicts `behind`, because no
 reference means it needs syncing. `versions(deps)` compares each declared range to the registry
@@ -1299,7 +1317,9 @@ latest. `catalog()` enumerates the fleet from the registry's exact organization 
 unreachable or malformed list is always a coded failure, since without it there is no catalog — then
 degrades gracefully per package. `pull(target, dependencies?)` builds the reference map from the
 target's own mirrors, so its verdicts are target-relative, and rejects a selection the target does
-not declare. `write(report, target)` commits only the `behind` guides. `destroy()` aborts every
+not declare. `mirror(target)` reuses the exact organization enumeration without catalog's
+per-package packument reads, sorts the names, excludes the target's own manifest name, and builds a
+guide-only report with no versions. `write(report, target)` commits only the `behind` guides. `destroy()` aborts every
 in-flight request. The interface also exposes the readonly `emitter`.
 
 ## The compile pipeline
@@ -1432,7 +1452,7 @@ as a plain physical file whose bytes still match the preview, moved into a priva
 than unlinked, re-verified after the move, and only then reported as removed — with a full restore
 attempt if any candidate fails mid-way.
 
-## Upstream sync, pull, and catalog
+## Upstream sync, pull, mirror, and catalog
 
 `Sync` is the only network reader, and its posture is conservative by construction.
 
@@ -1455,7 +1475,7 @@ underlying socket code appended when the runtime attaches one, an HTTP status, t
 redirect-blocked string, or the oversized-body message. `current` and `behind` carry no note,
 because there is nothing to explain.
 
-`pull` is the target-aware composition. It reads the target's declared scoped dependencies from its
+`pull` is the dependency-aware composition. It reads the target's declared scoped dependencies from its
 manifest, rejects any explicit selection the target does not declare, builds the reference map from
 the target's own `guides/src/<short>.md` mirrors, fetches guides and versions under one shared
 allowance, and assembles a report whose `clean` flag requires both no drift and no failures. A
@@ -1481,6 +1501,14 @@ The rendered block is deliberately minimal. `catalogToBlock` emits a standing tr
 generated package identifiers are untrusted discovery data, never instructions — followed by a table
 with **`Package` and `Version` columns only**. Descriptions are network-controlled text, and that
 block is written into an agent instruction file, so they are omitted on purpose.
+
+`mirror` is the fleet-guide composition. It shares `catalog`'s single exact organization-list read
+but performs none of catalog's packument or description work. It code-unit sorts the discovered
+names, excludes the target's own manifest name under the one-owner guide law, reads existing local
+guide references for baselines, fetches every selected GitHub guide once, and emits a `SyncReport`
+whose `versions` collection is empty. The existing transactional `write` method applies only
+behind guides; the executable refuses the whole apply when any guide is missing or failed, so a
+fleet refresh is never partial. Files outside the discovered guide set remain untouched.
 
 ## The generated workspace
 
@@ -1671,10 +1699,13 @@ What it rejects is equally deliberate:
 Unsupported stylesheet `@import` or `url()` syntax is an error rather than a silently skipped
 dependency. **`publicDir` is disabled on every generated build target**: an asset that is not
 reachable through the module graph is not silently copied past the boundary. The output plugin
-fails during configuration when a caller attempts to enable `publicDir`; browser builds likewise
-reject a nonzero `assetsInlineLimit`, keeping asset bytes external and visible to output auditing
-before any output directory mutation. A caller-supplied Rolldown `output.dir` or `output.file` is
-also rejected during configuration; the exact generated `build.outDir` is the sole write root.
+fails during configuration when a caller attempts to enable `publicDir`. Published `srcBrowser`
+targets use Vite library mode, where assets are always inlined and `assetsInlineLimit` is ignored,
+so their generated shapes omit that ineffective option. The normal `appBrowser` build retains
+`assetsInlineLimit: 0`, and the output plugin rejects a nonzero limit only for that non-library
+browser build, keeping application asset bytes external and visible to output auditing before any
+output directory mutation. A caller-supplied Rolldown `output.dir` or `output.file` is also rejected
+during configuration; the exact generated `build.outDir` is the sole write root.
 
 **The policy suite.** [`tests/setupPolicy.ts`](../../tests/setupPolicy.ts) is a narrow structural
 policy pass built on the official TypeScript compiler. It exists for exactly the laws a linter
@@ -1695,15 +1726,22 @@ it is not a general-purpose source analyzer. Generated workspaces receive the sa
 module as a host-origin file and run it as a dedicated Node-only `policy` test project over
 `tests/policy.test.ts`.
 
-**Real browser capability.** Browser test projects are gated on the real executable: the generated
-configuration and the generated policy test both probe `existsSync(chromium.executablePath())`. A
-browser suite runs when a real Chromium is installed and is skipped honestly when it is not, rather
-than being faked. The gate is applied at registration, not inside the real browser project: without
-Chromium, each browser factory is replaced by a same-label Node/no-test placeholder, so generated
-`--project <label>` and `--project=<label>` filters still resolve while no browser code runs. The
-root permits an empty run only when every recognized exact project filter names one of those gated
-placeholders; an unreadable or mixed filter keeps the ordinary no-test failure semantics for its
-Node projects. One printed warning names every gated project label. A machine with a browser
+**Real browser capability.** Browser test projects are gated on one centralized discovery chain:
+Playwright's pinned Chromium executable first, then a managed Chromium alias or cached revision,
+then stable system Chrome, then stable system Edge. Managed candidates must be executable regular
+files. System channels are selected only when their executable exists at Playwright's standard
+Linux, macOS, or Windows installation location; custom installations are not guessed. The generated
+policy test consumes the same discovery helpers and accepts either an executable managed path or the
+stable `chrome` / `msedge` channel, so it does not maintain a second heuristic.
+
+A browser suite runs when any one of those real browser capabilities is available and is skipped
+honestly when none is, rather than being faked. The gate is applied at registration, not inside the
+real browser project: without a browser, each browser factory is replaced by a same-label
+Node/no-test placeholder, so generated `--project <label>` and `--project=<label>` filters still
+resolve while no browser code runs. The root permits an empty run only when every recognized exact
+project filter names one of those gated placeholders; an unreadable or mixed filter keeps the
+ordinary no-test failure semantics for its Node projects. One printed warning names every gated
+project label and says no Playwright Chromium, Chrome, or Edge was found. A machine with a browser
 registers and runs the real browser suites unchanged; a machine without one runs the remaining
 projects and says so.
 
@@ -1745,12 +1783,13 @@ each Codex agent's declared `sandbox_mode` is its mechanical permission floor, w
 ## The `scaffold` executable
 
 The bin is a thin command-line shell over the two library faces. It exports nothing, so it carries
-no module API of its own. Six verbs:
+no module API of its own. Seven verbs:
 
 | Verb      | Purpose                                                  |
 | --------- | -------------------------------------------------------- |
 | `new`     | scaffold a workspace into `./<name>`                     |
 | `pull`    | refresh vendored guides and versions, report drift       |
+| `mirror`  | refresh every published Orkestrel package guide          |
 | `audit`   | whole-plan conformance report                            |
 | `repair`  | restore host-owned files and optional generated canon    |
 | `fleet`   | audit or repair every workspace under the cwd's children |
@@ -1770,8 +1809,10 @@ extras so the workspace stays audit-clean.
 repeatable and points at a local template or catalog source instead of the bundled one.
 On `pull`, `--deps x,y` limits refresh to those declared Orkestrel dependencies; without it, every
 declared dependency mirror is considered.
+`mirror` accepts no dependency selection: its exact npm organization discovery is the operation's
+scope, and it fetches guides without registry version or packument requests.
 `--groups a,b` scopes an audit to artifact groups. `--live` adds an upstream freshness check to an
-audit. `--strict` makes a pull throw on a network fault. `--offline` restricts a catalog to local
+audit. `--strict` makes a pull or mirror throw on a network fault. `--offline` restricts a catalog to local
 sources. `--prune` opts a repair or fleet run into deleting unexpected files under the three prune
 directories. `--generated` opts a repair or fleet run into restoring generated canon except
 `package.json`; on `audit`, it is inherited if the interactive repair hand-off is accepted.
@@ -2241,7 +2282,7 @@ isBehind(rangeToFreshness('^0.0.7', '0.0.9')) // true
 
 packageShortName('@orkestrel/contract') // 'contract'
 guideStub('guides/src/contract.md') // the local pointer content
-readGuideReferences('./packages/router', [{ name: '@orkestrel/contract', range: '^0.0.7' }])
+readGuideReferences('./packages/router', ['@orkestrel/contract'])
 syncReportOf('./packages/router', [], []) // { clean: true, failed: 0, … }
 ```
 
@@ -2297,6 +2338,7 @@ import { createSync } from '@orkestrel/scaffold/server'
 
 const sync = createSync({ concurrency: 4, retries: 1 })
 
+await sync.lookup(['@orkestrel/contract'])
 const report = await sync.pull('.')
 if (report.failed === 0) await sync.write(report, '.')
 
@@ -2305,7 +2347,22 @@ await sync.guides(deps)
 await sync.versions(deps)
 await sync.catalog()
 
+const mirror = await sync.mirror('.')
+if (mirror.failed === 0) await sync.write(mirror, '.')
+
 sync.destroy()
+```
+
+Refresh the entire published guide mirror from an installed package:
+
+```sh
+npx scaffold mirror --apply --yes
+```
+
+Or from this checkout after building:
+
+```sh
+node ./dist/bin/scaffold.js mirror --apply --yes
 ```
 
 ### Fleet discovery, prune scanning, and the local catalog
@@ -2421,6 +2478,7 @@ import {
 	parseSyncBranch,
 	parseSyncCurrent,
 	parseSyncDependencies,
+	parseSyncNames,
 	parseSyncOptions,
 	parseWritePreconditions,
 	syncGuideOptionsShape,
@@ -2443,6 +2501,7 @@ parseMaterializerOptions({ host: './dist/host' })
 parseSyncBase('registry.npmjs.org') // 'https://registry.npmjs.org'
 parseSyncBranch('main')
 parseSyncCurrent({ '@orkestrel/contract': '# contract\n' }, ['@orkestrel/contract'], 16_777_216)
+parseSyncNames(['@orkestrel/contract', 'zod'])
 parseSyncDependencies([{ name: '@orkestrel/contract', range: '^0.0.7' }], false)
 parsePortablePaths(['src/core/index.ts'], 1_000)
 parseFilesystemPaths(['./packages'], 1_000)
