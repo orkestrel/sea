@@ -1,6 +1,6 @@
 # SEA — Single Executable Application Builder
 
-> Node.js SEA builder — compress, blob, assemble, sign, and embed assets into a standalone binary. Pure TypeScript, no WASM, no external tools. Source: [`src/server`](../../src/server). Surfaced through the `@orkestrel/sea` barrel.
+> Node.js SEA builder — compress, blob, assemble, sign, and embed assets into a standalone binary. Pure TypeScript, no WASM, no external tools. Source: [`src/server`](../src/server). Surfaced through the `@orkestrel/sea` barrel.
 
 ## Overview
 
@@ -312,4 +312,4 @@ isPowerOfTwo(4096) // true
 
 ## See also
 
-- [`README.md`](../README.md) — the guides index.
+- [`README.md`](README.md) — the guides index.
