@@ -22,6 +22,22 @@ export function captureError(thunk: () => unknown): unknown {
 	}
 }
 
+/**
+ * Encode `text` as UTF-8 into a freshly allocated `ArrayBuffer` — the asset-content shape
+ * `Asset` and `AssetManager` accept. `TextEncoder` returns a view over a buffer the type
+ * system knows only as `ArrayBufferLike`, so the bytes are copied into an owned
+ * `ArrayBuffer` instead of asserted onto one (AGENTS: never use type assertions).
+ *
+ * @param text - The string to encode
+ * @returns An `ArrayBuffer` holding the UTF-8 bytes of `text`
+ */
+export function encodeContent(text: string): ArrayBuffer {
+	const bytes = new TextEncoder().encode(text)
+	const content = new ArrayBuffer(bytes.byteLength)
+	new Uint8Array(content).set(bytes)
+	return content
+}
+
 /** Whether a repository-relative Vue SFC path belongs to the private browser application. */
 export function isBrowserVuePath(path: string): boolean {
 	const normalized = path.replaceAll('\\', '/')

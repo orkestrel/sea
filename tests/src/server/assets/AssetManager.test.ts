@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AssetManager } from '@src/server'
+import { encodeContent } from '../../../setup.js'
 
 describe('AssetManager', () => {
 	// === count / assets / keys
@@ -18,7 +19,7 @@ describe('AssetManager', () => {
 
 	it('registers a single asset', () => {
 		const manager = new AssetManager()
-		const content = new TextEncoder().encode('hello').buffer as ArrayBuffer
+		const content = encodeContent('hello')
 
 		manager.register({ key: 'test.txt', content })
 
@@ -47,8 +48,8 @@ describe('AssetManager', () => {
 
 	it('overwrites duplicate keys without duplicating keys list', () => {
 		const manager = new AssetManager()
-		const content1 = new TextEncoder().encode('v1').buffer as ArrayBuffer
-		const content2 = new TextEncoder().encode('v2').buffer as ArrayBuffer
+		const content1 = encodeContent('v1')
+		const content2 = encodeContent('v2')
 
 		manager.register({ key: 'file.txt', content: content1 })
 		manager.register({ key: 'file.txt', content: content2 })

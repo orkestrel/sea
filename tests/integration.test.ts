@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createSEA, isSEAError, SEA } from '@src/server'
-import { createSEAOptions, withTestDir } from '../setupServer.js'
+import { createSEAOptions, withTestDir } from './setupServer.js'
 
 describe('seal integration', () => {
 	// Injects into the CURRENT node binary's real executable format. On some

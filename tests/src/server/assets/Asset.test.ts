@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { Asset } from '@src/server'
+import { encodeContent } from '../../../setup.js'
 
 describe('Asset', () => {
 	it('stores key and content from input', () => {
-		const content = new TextEncoder().encode('hello').buffer as ArrayBuffer
+		const content = encodeContent('hello')
 		const asset = new Asset({ key: 'test.txt', content })
 
 		expect(asset.key).toBe('test.txt')

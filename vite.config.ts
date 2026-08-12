@@ -128,7 +128,7 @@ export const integration = (options?: UserConfig): UserConfig =>
 			resolve,
 			test: {
 				name: { label: 'integration', color: 'blue' },
-				include: ['tests/integration/**/*.test.ts'],
+				include: ['tests/integration.test.ts'],
 				setupFiles: ['./tests/setup.ts'],
 				environment: 'node',
 				testTimeout: 120_000,
