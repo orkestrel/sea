@@ -202,7 +202,7 @@ export class SEA implements SEAInterface {
 			total += walkDirectory(directory).filter(isCompressible).length
 		}
 
-		const assets: SEACompressionManifest['assets'][number][] = []
+		const assets: Array<SEACompressionManifest['assets'][number]> = []
 		let original = 0
 		let compressed = 0
 		let current = 0
