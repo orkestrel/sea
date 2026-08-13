@@ -16,7 +16,7 @@ import {
 	parsePeResourceLeaves,
 	withTestDir,
 } from '../../../setupServer.js'
-import { captureError } from '../../../setup.js'
+import { captureError } from '@orkestrel/test'
 
 // Recomputes the classic Windows IMAGE checksum independently of the
 // injector's implementation, to assert against without testing a tautology.

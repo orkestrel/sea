@@ -41,7 +41,7 @@ import {
 	writeU16,
 } from '@src/server'
 import { buildPeFixture, withTestDir } from '../../setupServer.js'
-import { captureError } from '../../setup.js'
+import { captureError } from '@orkestrel/test'
 
 describe('helpers', () => {
 	describe('redactCommand', () => {
