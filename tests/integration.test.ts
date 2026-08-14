@@ -3,10 +3,10 @@
 // is slow (~100MB copy + subprocess) and environment-dependent, so they are
 // kept OUT of the default `test` run and live in this dedicated, opt-in
 // `integration` project instead (run via `npm run test:integration`).
-import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createSEA, isSEAError, SEA } from '@src/server'
+import { requireValue } from '@orkestrel/test'
 import { createSEAOptions, withTestDir } from './setupServer.js'
 
 describe('seal integration', () => {
@@ -19,11 +19,11 @@ describe('seal integration', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const events: string[] = []
 				const seal = createSEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 					}),
 				)
 
@@ -55,7 +55,7 @@ describe('seal integration', () => {
 				expect(result.platform).toBe(process.platform)
 				expect(result.size).toBeGreaterThan(0)
 				expect(result.duration).toBeGreaterThanOrEqual(0)
-				expect(existsSync(result.executable)).toBe(true)
+				expect(scratch.has(result.executable)).toBe(true)
 				expect(events).toEqual(['compress', 'blob', 'assemble', 'complete'])
 
 				// Platform-conditional result fields — only meaningful once a real
@@ -79,10 +79,10 @@ describe('seal integration', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const seal = createSEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						entry: { path: 'entry.cjs', format: 'cjs' },
 					}),
 				)
@@ -95,12 +95,11 @@ describe('seal integration', () => {
 					// on a constrained CI binary.
 				}
 
-				const configPath = join(dir.root, 'dist', 'sea-config.json')
-				expect(existsSync(configPath)).toBe(true)
+				expect(scratch.has('dist/sea-config.json')).toBe(true)
 
-				const config: unknown = JSON.parse(readFileSync(configPath, 'utf-8'))
+				const config: unknown = JSON.parse(requireValue(scratch.read('dist/sea-config.json')))
 				expect(config).toMatchObject({
-					main: join(dir.root, 'entry.cjs'),
+					main: join(scratch.path, 'entry.cjs'),
 					disableExperimentalSEAWarning: true,
 					useCodeCache: true,
 					useSnapshot: false,
@@ -120,11 +119,11 @@ describe('seal integration', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const events: string[] = []
 				const seal = new SEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						on: {
 							compress: () => {
 								events.push('compress')

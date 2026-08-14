@@ -20,9 +20,9 @@ describe('factories', () => {
 
 	describe('createInjector', () => {
 		it('constructs an InjectorInterface that detects the executable format', async () => {
-			await withTestDir({}, (dir) => {
-				const executable = join(dir.root, 'app.exe')
-				const blob = join(dir.root, 'sea-prep.blob')
+			await withTestDir({}, (scratch) => {
+				const executable = join(scratch.path, 'app.exe')
+				const blob = join(scratch.path, 'sea-prep.blob')
 
 				// A minimal ELF header is enough for the Injector's format
 				// detection to succeed without needing a full PE fixture here.

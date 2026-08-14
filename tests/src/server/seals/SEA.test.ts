@@ -1,11 +1,3 @@
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	symlinkSync,
-	writeFileSync,
-} from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { isSEAError, SEA } from '@src/server'
@@ -20,14 +12,14 @@ describe('SEA', () => {
 	})
 
 	it('emits error events for build failures', async () => {
-		await withTestDir({}, async (dir) => {
+		await withTestDir({}, async (scratch) => {
 			const errors: unknown[] = []
 			const onError = (error: unknown): void => {
 				errors.push(error)
 			}
 			const seal = new SEA(
 				createSEAOptions({
-					root: dir.root,
+					root: scratch.path,
 					entry: { path: 'missing.cjs' },
 				}),
 			)
@@ -65,13 +57,13 @@ describe('SEA', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const controller = new AbortController()
 				controller.abort()
 
 				const seal = new SEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						signal: controller.signal,
 					}),
 				)
@@ -84,7 +76,7 @@ describe('SEA', () => {
 				expect(isSEAError(error) && error.code).toBe('ABORT')
 
 				expect(seal.status).toBe('error')
-				expect(existsSync(join(dir.root, 'dist'))).toBe(false)
+				expect(scratch.has('dist')).toBe(false)
 
 				seal.destroy()
 			},
@@ -96,18 +88,16 @@ describe('SEA', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const controller = new AbortController()
-				const output = join(dir.root, 'dist')
-				mkdirSync(output, { recursive: true })
+				scratch.ensure('dist')
 				const name = process.platform === 'win32' ? 'seal-test.exe' : 'seal-test'
-				const finalOutput = join(output, name)
 				const sentinel = 'sentinel-bytes'
-				writeFileSync(finalOutput, sentinel)
+				scratch.write(`dist/${name}`, sentinel)
 
 				const seal = new SEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						signal: controller.signal,
 						on: {
 							blob: () => {
@@ -124,8 +114,8 @@ describe('SEA', () => {
 				expect(isSEAError(error)).toBe(true)
 				expect(isSEAError(error) && error.code).toBe('ABORT')
 
-				expect(readFileSync(finalOutput, 'utf-8')).toBe(sentinel)
-				const remaining = readdirSync(output).filter((entry) => entry.includes('.tmp'))
+				expect(scratch.read(`dist/${name}`)).toBe(sentinel)
+				const remaining = scratch.names('dist').filter((entry) => entry.includes('.tmp'))
 				expect(remaining).toHaveLength(0)
 
 				seal.destroy()
@@ -138,11 +128,11 @@ describe('SEA', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const events: string[] = []
 				const seal = new SEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						assets: { '../evil': 'entry.cjs' },
 						on: {
 							compress: () => {
@@ -170,11 +160,11 @@ describe('SEA', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const events: string[] = []
 				const seal = new SEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						compression: { paths: ['../..'] },
 						on: {
 							compress: () => {
@@ -203,13 +193,13 @@ describe('SEA', () => {
 				'root/entry.cjs': "console.log('hello from seal')\n",
 				'outside/secret.txt': 'secret',
 			},
-			async (dir) => {
-				const root = join(dir.root, 'root')
-				const target = join(dir.root, 'outside', 'secret.txt')
+			async (scratch) => {
+				const root = join(scratch.path, 'root')
+				const target = join(scratch.path, 'outside', 'secret.txt')
 				const link = join(root, 'escaped')
 
 				try {
-					symlinkSync(target, link)
+					scratch.link(link, target)
 				} catch {
 					context.skip()
 					return
@@ -246,11 +236,11 @@ describe('SEA', () => {
 			{
 				'entry.cjs': "console.log('hello from seal')\n",
 			},
-			async (dir) => {
+			async (scratch) => {
 				const events: string[] = []
 				const seal = new SEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						name: '../evil',
 						on: {
 							compress: () => {
@@ -280,11 +270,11 @@ describe('SEA', () => {
 				'assets/b.html': '<p>b</p>',
 				'assets/c.png': 'not-really-a-png',
 			},
-			async (dir) => {
+			async (scratch) => {
 				const progress: Array<{ current: number; total: number }> = []
 				const seal = new SEA(
 					createSEAOptions({
-						root: dir.root,
+						root: scratch.path,
 						entry: { path: 'missing-entry.cjs' },
 						compression: { paths: ['assets'] },
 						on: {
@@ -329,11 +319,11 @@ describe('SEA', () => {
 				{
 					'entry.cjs': "console.log('hello from seal')\n",
 				},
-				async (dir) => {
+				async (scratch) => {
 					const events: string[] = []
 					const seal = new SEA(
 						createSEAOptions({
-							root: dir.root,
+							root: scratch.path,
 							windows: { sign: {} },
 							on: {
 								compress: () => {
@@ -362,11 +352,11 @@ describe('SEA', () => {
 					'entry.cjs': "console.log('hello from seal')\n",
 					'cert.pfx': 'not-a-real-cert',
 				},
-				async (dir) => {
+				async (scratch) => {
 					const events: string[] = []
 					const seal = new SEA(
 						createSEAOptions({
-							root: dir.root,
+							root: scratch.path,
 							windows: {
 								sign: {
 									file: 'cert.pfx',
@@ -400,11 +390,11 @@ describe('SEA', () => {
 					'entry.cjs': "console.log('hello from seal')\n",
 					'cert.pfx': 'not-a-real-cert',
 				},
-				async (dir) => {
+				async (scratch) => {
 					const events: string[] = []
 					const seal = new SEA(
 						createSEAOptions({
-							root: dir.root,
+							root: scratch.path,
 							windows: {
 								sign: { file: 'cert.pfx', timestamp: 'ftp://timestamp.example.com' },
 							},
@@ -434,11 +424,11 @@ describe('SEA', () => {
 				{
 					'entry.cjs': "console.log('hello from seal')\n",
 				},
-				async (dir) => {
+				async (scratch) => {
 					const events: string[] = []
 					const seal = new SEA(
 						createSEAOptions({
-							root: dir.root,
+							root: scratch.path,
 							windows: { sign: { file: 'missing-cert.pfx' } },
 							on: {
 								compress: () => {

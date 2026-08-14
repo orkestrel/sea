@@ -1,4 +1,4 @@
-import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Injector, isSEAError, SEA_SENTINEL_FUSE } from '@src/server'
@@ -42,9 +42,9 @@ function computePeChecksum(buf: Buffer, checksumOffset: number): number {
 describe('Injector', () => {
 	describe('detection', () => {
 		it('detects PE executables', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test.exe')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test.exe')
+				const blob = join(scratch.path, 'blob.bin')
 				const buffer = Buffer.alloc(0x44)
 
 				buffer.writeUInt16LE(0x5a4d, 0)
@@ -52,7 +52,7 @@ describe('Injector', () => {
 				buffer.writeUInt32LE(0x00004550, 0x40)
 
 				writeFileSync(executable, buffer)
-				writeFileSync(blob, 'blob')
+				scratch.write('blob.bin', 'blob')
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
@@ -61,12 +61,12 @@ describe('Injector', () => {
 		})
 
 		it('detects ELF executables', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
-				writeFileSync(blob, 'blob')
+				scratch.write('blob.bin', 'blob')
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
@@ -75,15 +75,15 @@ describe('Injector', () => {
 		})
 
 		it('detects Mach-O executables', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
 				const buffer = Buffer.alloc(4)
 
 				buffer.writeUInt32LE(0xfeedfacf, 0)
 
 				writeFileSync(executable, buffer)
-				writeFileSync(blob, 'blob')
+				scratch.write('blob.bin', 'blob')
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
@@ -92,12 +92,12 @@ describe('Injector', () => {
 		})
 
 		it('throws for unknown executable formats', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'unknown.bin')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'unknown.bin')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, Buffer.from([0x00, 0x01, 0x02, 0x03]))
-				writeFileSync(blob, 'blob')
+				scratch.write('blob.bin', 'blob')
 
 				const error = captureError(() => {
 					return new Injector(createInjectorOptions({ executable, blob }))
@@ -108,12 +108,12 @@ describe('Injector', () => {
 		})
 
 		it('throws for garbage binary content', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'garbage.bin')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'garbage.bin')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00]))
-				writeFileSync(blob, 'blob')
+				scratch.write('blob.bin', 'blob')
 
 				const error = captureError(() => {
 					return new Injector(createInjectorOptions({ executable, blob }))
@@ -126,13 +126,13 @@ describe('Injector', () => {
 
 	describe('ELF injection', () => {
 		it('injects a PT_NOTE that is reachable via a mapped PT_LOAD (memory-residency invariant)', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
 				const blobContent = 'sea blob payload for elf note injection'
 
 				writeFileSync(executable, buildElfFixture())
-				writeFileSync(blob, blobContent)
+				scratch.write('blob.bin', blobContent)
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
@@ -168,16 +168,16 @@ describe('Injector', () => {
 		})
 
 		it('leaves exactly one active NODE_SEA PT_NOTE when injected twice (overwrite)', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, buildElfFixture())
-				writeFileSync(blob, 'first blob content')
+				scratch.write('blob.bin', 'first blob content')
 
 				new Injector(createInjectorOptions({ executable, blob })).inject()
 
-				writeFileSync(blob, 'second, different blob content')
+				scratch.write('blob.bin', 'second, different blob content')
 				new Injector(createInjectorOptions({ executable, blob })).inject()
 
 				const result = readFileSync(executable)
@@ -194,14 +194,14 @@ describe('Injector', () => {
 
 	describe('Mach-O injection', () => {
 		it('injects a NODE_SEA segment placed immediately before a relocated __LINKEDIT ending at EOF', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
 				const blobContent = 'sea blob payload for macho segment injection'
 
 				writeFileSync(executable, buildMachoFixture())
 				chmodSync(executable, 0o755)
-				writeFileSync(blob, blobContent)
+				scratch.write('blob.bin', blobContent)
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 				const modeBefore = statSync(executable).mode
@@ -212,7 +212,7 @@ describe('Injector', () => {
 				// executable's mode exactly, and must not leave its `.inject-*.tmp`
 				// staging file behind.
 				expect(statSync(executable).mode).toBe(modeBefore)
-				const leftoverTemp = readdirSync(dir.root).filter((name) => name.startsWith('.inject-'))
+				const leftoverTemp = scratch.names().filter((name) => name.startsWith('.inject-'))
 				expect(leftoverTemp).toEqual([])
 
 				const result = readFileSync(executable)
@@ -271,16 +271,16 @@ describe('Injector', () => {
 		})
 
 		it('leaves exactly one NODE_SEA segment when injected twice (overwrite)', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, buildMachoFixture())
-				writeFileSync(blob, 'first payload')
+				scratch.write('blob.bin', 'first payload')
 
 				new Injector(createInjectorOptions({ executable, blob })).inject()
 
-				writeFileSync(blob, 'second, different payload content')
+				scratch.write('blob.bin', 'second, different payload content')
 				new Injector(createInjectorOptions({ executable, blob })).inject()
 
 				const result = readFileSync(executable)
@@ -294,12 +294,12 @@ describe('Injector', () => {
 		})
 
 		it('throws INJECT when there is not enough header space for the new load command', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, buildMachoFixture({ tightHeaders: true }))
-				writeFileSync(blob, 'blob content')
+				scratch.write('blob.bin', 'blob content')
 
 				const error = captureError(() => {
 					new Injector(createInjectorOptions({ executable, blob })).inject()
@@ -310,12 +310,12 @@ describe('Injector', () => {
 		})
 
 		it('rejects a fat/universal Mach-O with a coded FORMAT error', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'fat.bin')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'fat.bin')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, buildFatMachoFixture())
-				writeFileSync(blob, 'blob')
+				scratch.write('blob.bin', 'blob')
 
 				const error = captureError(() => {
 					return new Injector(createInjectorOptions({ executable, blob }))
@@ -328,12 +328,12 @@ describe('Injector', () => {
 
 	describe('PE injection', () => {
 		it('recomputes a valid PE checksum after injecting a resource', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test.exe')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test.exe')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, buildPeFixture())
-				writeFileSync(blob, 'blob content')
+				scratch.write('blob.bin', 'blob content')
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
@@ -351,9 +351,9 @@ describe('Injector', () => {
 		})
 
 		it('recomputes the PE checksum AFTER the sentinel-fuse flip, not before', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test.exe')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test.exe')
+				const blob = join(scratch.path, 'blob.bin')
 
 				const fixture = buildPeFixture()
 				// Embed the sentinel fuse (unset: ':0') so inject() flips it to ':1' —
@@ -363,7 +363,7 @@ describe('Injector', () => {
 				fuseBuf.copy(fixture, fixture.length - fuseBuf.length - 16)
 
 				writeFileSync(executable, fixture)
-				writeFileSync(blob, 'blob content')
+				scratch.write('blob.bin', 'blob content')
 
 				const injector = new Injector(
 					createInjectorOptions({ executable, blob, fuse: SEA_SENTINEL_FUSE }),
@@ -398,12 +398,12 @@ describe('Injector', () => {
 		})
 
 		it('injects into a PE32+ (64-bit) image successfully', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test.exe')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test.exe')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, buildPeFixture({ plus: true }))
-				writeFileSync(blob, 'blob content for pe32plus')
+				scratch.write('blob.bin', 'blob content for pe32plus')
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 
@@ -426,12 +426,12 @@ describe('Injector', () => {
 		})
 
 		it('preserves an existing resource leaf while adding the blob leaf', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test.exe')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test.exe')
+				const blob = join(scratch.path, 'blob.bin')
 
 				writeFileSync(executable, buildPeFixture({ resources: true }))
-				writeFileSync(blob, 'the injected blob')
+				scratch.write('blob.bin', 'the injected blob')
 
 				const injector = new Injector(createInjectorOptions({ executable, blob }))
 				injector.inject()
@@ -450,9 +450,9 @@ describe('Injector', () => {
 		})
 
 		it('throws FORMAT for malformed (non-power-of-two) PE alignment', async () => {
-			await withTestDir({}, async (dir) => {
-				const executable = join(dir.root, 'test.exe')
-				const blob = join(dir.root, 'blob.bin')
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test.exe')
+				const blob = join(scratch.path, 'blob.bin')
 
 				const fixture = buildPeFixture()
 				const peOffset = fixture.readUInt32LE(0x3c)
@@ -460,7 +460,7 @@ describe('Injector', () => {
 				fixture.writeUInt32LE(0, optionalOffset + 36) // FileAlignment = 0
 
 				writeFileSync(executable, fixture)
-				writeFileSync(blob, 'blob content')
+				scratch.write('blob.bin', 'blob content')
 
 				const error = captureError(() => {
 					new Injector(createInjectorOptions({ executable, blob })).inject()

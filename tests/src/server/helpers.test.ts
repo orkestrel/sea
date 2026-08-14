@@ -1,13 +1,4 @@
-import {
-	closeSync,
-	existsSync,
-	mkdirSync,
-	openSync,
-	readFileSync,
-	readSync,
-	symlinkSync,
-	writeFileSync,
-} from 'node:fs'
+import { closeSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
@@ -155,11 +146,11 @@ describe('helpers', () => {
 				{
 					'base/inside.txt': 'inside',
 				},
-				(dir) => {
-					const base = join(dir.root, 'base')
+				(scratch) => {
+					const base = join(scratch.path, 'base')
 					const real = ensureContained(base, 'inside.txt')
 
-					expect(existsSync(real)).toBe(true)
+					expect(scratch.has(real)).toBe(true)
 				},
 			)
 		})
@@ -170,13 +161,13 @@ describe('helpers', () => {
 					'base/marker.txt': 'marker',
 					'outside/secret.txt': 'secret',
 				},
-				(dir) => {
-					const base = join(dir.root, 'base')
-					const outside = join(dir.root, 'outside')
+				(scratch) => {
+					const base = join(scratch.path, 'base')
+					const outside = join(scratch.path, 'outside')
 					const link = join(base, 'escaped')
 
 					try {
-						symlinkSync(outside, link)
+						scratch.link(link, outside)
 					} catch {
 						context.skip()
 						return
@@ -196,8 +187,8 @@ describe('helpers', () => {
 				{
 					'base/marker.txt': 'marker',
 				},
-				(dir) => {
-					const base = join(dir.root, 'base')
+				(scratch) => {
+					const base = join(scratch.path, 'base')
 
 					const error = captureError(() => {
 						ensureContained(base, 'missing.txt')
@@ -232,14 +223,14 @@ describe('helpers', () => {
 					'app.tmp': 'new content',
 					app: 'old content',
 				},
-				(dir) => {
-					const source = join(dir.root, 'app.tmp')
-					const target = join(dir.root, 'app')
+				(scratch) => {
+					const source = join(scratch.path, 'app.tmp')
+					const target = join(scratch.path, 'app')
 
 					finalizeExecutable(source, target)
 
-					expect(readFileSync(target, 'utf-8')).toBe('new content')
-					expect(existsSync(source)).toBe(false)
+					expect(scratch.read('app')).toBe('new content')
+					expect(scratch.has('app.tmp')).toBe(false)
 				},
 			)
 		})
@@ -247,9 +238,9 @@ describe('helpers', () => {
 
 	describe('copyRange', () => {
 		it('copies a range from a nonzero start', async () => {
-			await withTestDir({}, (dir) => {
-				const sourcePath = join(dir.root, 'source.bin')
-				const targetPath = join(dir.root, 'target.bin')
+			await withTestDir({}, (scratch) => {
+				const sourcePath = join(scratch.path, 'source.bin')
+				const targetPath = join(scratch.path, 'target.bin')
 				const source = Buffer.from('0123456789abcdefghij', 'utf-8')
 				writeFileSync(sourcePath, source)
 				writeFileSync(targetPath, Buffer.alloc(0))
@@ -263,14 +254,14 @@ describe('helpers', () => {
 					closeSync(dstFd)
 				}
 
-				expect(readFileSync(targetPath).toString('utf-8')).toBe('56789a')
+				expect(scratch.read('target.bin')).toBe('56789a')
 			})
 		})
 
 		it('copies a partial length shorter than the source', async () => {
-			await withTestDir({}, (dir) => {
-				const sourcePath = join(dir.root, 'source.bin')
-				const targetPath = join(dir.root, 'target.bin')
+			await withTestDir({}, (scratch) => {
+				const sourcePath = join(scratch.path, 'source.bin')
+				const targetPath = join(scratch.path, 'target.bin')
 				writeFileSync(sourcePath, Buffer.from('the quick brown fox', 'utf-8'))
 				writeFileSync(targetPath, Buffer.alloc(0))
 
@@ -283,14 +274,14 @@ describe('helpers', () => {
 					closeSync(dstFd)
 				}
 
-				expect(readFileSync(targetPath).toString('utf-8')).toBe('the')
+				expect(scratch.read('target.bin')).toBe('the')
 			})
 		})
 
 		it('is a no-op when length is 0', async () => {
-			await withTestDir({}, (dir) => {
-				const sourcePath = join(dir.root, 'source.bin')
-				const targetPath = join(dir.root, 'target.bin')
+			await withTestDir({}, (scratch) => {
+				const sourcePath = join(scratch.path, 'source.bin')
+				const targetPath = join(scratch.path, 'target.bin')
 				writeFileSync(sourcePath, Buffer.from('anything', 'utf-8'))
 				writeFileSync(targetPath, Buffer.alloc(0))
 
@@ -308,9 +299,9 @@ describe('helpers', () => {
 		})
 
 		it('spans multiple chunks when the range exceeds chunk size', async () => {
-			await withTestDir({}, (dir) => {
-				const sourcePath = join(dir.root, 'source.bin')
-				const targetPath = join(dir.root, 'target.bin')
+			await withTestDir({}, (scratch) => {
+				const sourcePath = join(scratch.path, 'source.bin')
+				const targetPath = join(scratch.path, 'target.bin')
 				const source = Buffer.from('abcdefghijklmnopqrstuvwxyz', 'utf-8')
 				writeFileSync(sourcePath, source)
 				writeFileSync(targetPath, Buffer.alloc(0))
@@ -326,9 +317,7 @@ describe('helpers', () => {
 					closeSync(dstFd)
 				}
 
-				expect(readFileSync(targetPath).toString('utf-8')).toBe(
-					source.subarray(3, 16).toString('utf-8'),
-				)
+				expect(scratch.read('target.bin')).toBe(source.subarray(3, 16).toString('utf-8'))
 			})
 		})
 	})
@@ -385,13 +374,13 @@ describe('helpers', () => {
 					'root/inside.txt': 'inside',
 					'outside.txt': 'outside',
 				},
-				(dir) => {
-					const root = join(dir.root, 'root')
-					const target = join(dir.root, 'outside.txt')
+				(scratch) => {
+					const root = join(scratch.path, 'root')
+					const target = join(scratch.path, 'outside.txt')
 					const link = join(root, 'escaped.txt')
 
 					try {
-						symlinkSync(target, link)
+						scratch.link(link, target)
 					} catch {
 						return
 					}
@@ -411,8 +400,8 @@ describe('helpers', () => {
 					'root/alpha.txt': 'a',
 					'root/bravo/inside.txt': 'b',
 				},
-				(dir) => {
-					const root = join(dir.root, 'root')
+				(scratch) => {
+					const root = join(scratch.path, 'root')
 					const files = [...walkDirectory(root)]
 					const sorted = [...files].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
 
@@ -430,8 +419,8 @@ describe('helpers', () => {
 					'root/b.html': '<p>b</p>',
 					'root/c.png': 'not-really-a-png',
 				},
-				(dir) => {
-					const root = join(dir.root, 'root')
+				(scratch) => {
+					const root = join(scratch.path, 'root')
 					const results: string[] = []
 
 					const manifest = compressDirectory(root, undefined, (result) => {
@@ -451,8 +440,8 @@ describe('helpers', () => {
 				{
 					'root/marker.txt': 'marker',
 				},
-				(dir) => {
-					const root = join(dir.root, 'root')
+				(scratch) => {
+					const root = join(scratch.path, 'root')
 
 					expect(() => {
 						syncDirectory(root)
@@ -462,8 +451,8 @@ describe('helpers', () => {
 		})
 
 		it('throws SEAError with code OUTPUT for a nonexistent path', async () => {
-			await withTestDir({}, (dir) => {
-				const missing = join(dir.root, 'does-not-exist')
+			await withTestDir({}, (scratch) => {
+				const missing = join(scratch.path, 'does-not-exist')
 
 				const error = captureError(() => {
 					syncDirectory(missing)
@@ -478,10 +467,9 @@ describe('helpers', () => {
 			})
 		})
 
-		it('is a no-op-safe call after mkdirSync creates the directory', async () => {
-			await withTestDir({}, (dir) => {
-				const created = join(dir.root, 'created')
-				mkdirSync(created)
+		it('is a no-op-safe call after ensure creates the directory', async () => {
+			await withTestDir({}, (scratch) => {
+				const created = scratch.ensure('created')
 
 				expect(() => {
 					syncDirectory(created)
@@ -681,8 +669,8 @@ describe('helpers', () => {
 
 	describe('parsePEOffset / readU16 / writeU16 / isPEExecutable', () => {
 		it('parses the PE header offset from a valid PE fixture', async () => {
-			await withTestDir({}, (dir) => {
-				const path = join(dir.root, 'app.exe')
+			await withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'app.exe')
 				const buf = buildPeFixture()
 				writeFileSync(path, buf)
 
@@ -696,8 +684,8 @@ describe('helpers', () => {
 		})
 
 		it('returns 0 for a file too short to contain the e_lfanew field', async () => {
-			await withTestDir({}, (dir) => {
-				const path = join(dir.root, 'short.bin')
+			await withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'short.bin')
 				writeFileSync(path, Buffer.alloc(8))
 
 				const fd = openSync(path, 'r')
@@ -710,8 +698,8 @@ describe('helpers', () => {
 		})
 
 		it('round-trips readU16/writeU16 including boundary values', async () => {
-			await withTestDir({}, (dir) => {
-				const path = join(dir.root, 'scratch.bin')
+			await withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'scratch.bin')
 				writeFileSync(path, Buffer.alloc(16))
 
 				const fd = openSync(path, 'r+')
@@ -727,8 +715,8 @@ describe('helpers', () => {
 		})
 
 		it('is little-endian', async () => {
-			await withTestDir({}, (dir) => {
-				const path = join(dir.root, 'endian.bin')
+			await withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'endian.bin')
 				writeFileSync(path, Buffer.alloc(4))
 
 				const fd = openSync(path, 'r+')
@@ -745,8 +733,8 @@ describe('helpers', () => {
 		})
 
 		it('recognizes a valid PE fixture as a PE executable', async () => {
-			await withTestDir({}, (dir) => {
-				const path = join(dir.root, 'app.exe')
+			await withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'app.exe')
 				writeFileSync(path, buildPeFixture())
 
 				expect(isPEExecutable(path)).toBe(true)
@@ -754,8 +742,8 @@ describe('helpers', () => {
 		})
 
 		it('rejects non-PE bytes', async () => {
-			await withTestDir({}, (dir) => {
-				const path = join(dir.root, 'not-pe.bin')
+			await withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'not-pe.bin')
 				writeFileSync(path, Buffer.from('this is not a PE file at all'))
 
 				expect(isPEExecutable(path)).toBe(false)
@@ -771,8 +759,8 @@ describe('helpers', () => {
 		it.each([false, true])(
 			'patches the subsystem u16 without touching neighbors (plus=%s)',
 			(plus) => {
-				return withTestDir({}, (dir) => {
-					const path = join(dir.root, 'app.exe')
+				return withTestDir({}, (scratch) => {
+					const path = join(scratch.path, 'app.exe')
 					const original = buildPeFixture({ plus })
 					writeFileSync(path, original)
 
@@ -798,8 +786,8 @@ describe('helpers', () => {
 
 	describe('stripPESignature', () => {
 		it.each([false, true])('zeroes the 8-byte security directory entry (plus=%s)', (plus) => {
-			return withTestDir({}, (dir) => {
-				const path = join(dir.root, 'app.exe')
+			return withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'app.exe')
 				const buf = buildPeFixture({ plus })
 				const peOffset = buf.readUInt32LE(0x3c)
 				const securityDirOffset = plus ? peOffset + 168 : peOffset + 152
@@ -829,8 +817,8 @@ describe('helpers', () => {
 		})
 
 		it('truncates a trailing certificate overlay described by the security directory', () => {
-			return withTestDir({}, (dir) => {
-				const path = join(dir.root, 'signed.exe')
+			return withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'signed.exe')
 				const certSize = 64
 				const withCert = buildPeFixture({ cert: certSize })
 				const expectedTruncatedSize = withCert.length - certSize
@@ -860,20 +848,20 @@ describe('helpers', () => {
 		}
 
 		it('flips an unset fuse from :0 to :1', () => {
-			return withTestDir({}, (dir) => {
-				const path = join(dir.root, 'app.exe')
+			return withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'app.exe')
 				writeFileSync(path, buildFuseFixture('MY_FUSE', ':0'))
 
 				patchSentinelFuse(path, 'MY_FUSE')
 
-				const after = readFileSync(path, 'utf-8')
-				expect(after.includes('MY_FUSE:1')).toBe(true)
+				const after = scratch.read('app.exe')
+				expect(after?.includes('MY_FUSE:1')).toBe(true)
 			})
 		})
 
 		it('is a no-op when the fuse is already flipped to :1', () => {
-			return withTestDir({}, (dir) => {
-				const path = join(dir.root, 'app.exe')
+			return withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'app.exe')
 				const buf = buildFuseFixture('MY_FUSE', ':1')
 				writeFileSync(path, buf)
 
@@ -885,8 +873,8 @@ describe('helpers', () => {
 		})
 
 		it('throws SEAError code FUSE for an unexpected sentinel value', () => {
-			return withTestDir({}, (dir) => {
-				const path = join(dir.root, 'app.exe')
+			return withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'app.exe')
 				writeFileSync(path, buildFuseFixture('MY_FUSE', ':X'))
 
 				const error = captureError(() => {
@@ -898,8 +886,8 @@ describe('helpers', () => {
 		})
 
 		it('throws SEAError code FUSE when the sentinel is not found', () => {
-			return withTestDir({}, (dir) => {
-				const path = join(dir.root, 'app.exe')
+			return withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'app.exe')
 				writeFileSync(path, Buffer.from('no fuse token here at all'))
 
 				const error = captureError(() => {
@@ -954,13 +942,13 @@ describe('helpers', () => {
 				{
 					'input.html': '<p>hello hello hello</p>',
 				},
-				(dir) => {
-					const input = join(dir.root, 'input.html')
-					const output = join(dir.root, 'input.html.br')
+				(scratch) => {
+					const input = join(scratch.path, 'input.html')
+					const output = join(scratch.path, 'input.html.br')
 
 					const result = compressFile(input, output)
 
-					expect(existsSync(output)).toBe(true)
+					expect(scratch.has('input.html.br')).toBe(true)
 					expect(result.input).toBe(input)
 					expect(result.output).toBe(output)
 					expect(result.size.original).toBeGreaterThan(0)
@@ -975,13 +963,13 @@ describe('helpers', () => {
 					'input.html': '<p>hello</p>',
 					'victim.txt': 'do not touch me',
 				},
-				(dir) => {
-					const input = join(dir.root, 'input.html')
-					const victim = join(dir.root, 'victim.txt')
-					const output = join(dir.root, 'input.html.br')
+				(scratch) => {
+					const input = join(scratch.path, 'input.html')
+					const victim = join(scratch.path, 'victim.txt')
+					const output = join(scratch.path, 'input.html.br')
 
 					try {
-						symlinkSync(victim, output)
+						scratch.link(output, victim)
 					} catch {
 						context.skip()
 						return
@@ -992,7 +980,7 @@ describe('helpers', () => {
 					})
 
 					expect(isSEAError(error) && error.code === 'OUTPUT').toBe(true)
-					expect(readFileSync(victim, 'utf-8')).toBe('do not touch me')
+					expect(scratch.read('victim.txt')).toBe('do not touch me')
 				},
 			)
 		})
