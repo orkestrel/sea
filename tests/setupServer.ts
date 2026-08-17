@@ -6,6 +6,7 @@
 import type { InjectorOptions, SEAOptions } from '@src/server'
 import type { ScratchInterface } from '@orkestrel/test/server'
 import { fileURLToPath } from 'node:url'
+import { resolveRoot } from '@orkestrel/test'
 import { createScratch } from '@orkestrel/test/server'
 import {
 	ELF_CLASS_64,
@@ -19,7 +20,7 @@ import {
 	PE_SIGNATURE,
 } from '@src/server'
 
-export const WORKSPACE_ROOT = fileURLToPath(new URL('..', import.meta.url))
+export const WORKSPACE_ROOT = fileURLToPath(resolveRoot(import.meta))
 
 // === Temp directories
 
