@@ -1,6 +1,6 @@
 {
 	"name": "@orkestrel/sea",
-	"version": "0.0.6",
+	"version": "0.0.7",
 	"description": "A pure-TypeScript Node.js Single Executable Application (SEA) builder — compresses assets, assembles the SEA blob, and injects it into PE/ELF/Mach-O binaries with no size ceiling. Part of the @orkestrel line.",
 	"keywords": [
 		"executable",
@@ -67,14 +67,14 @@
 		"prepublishOnly": "npm run format:check && npm run lint:check && npm run check && npm run build && npm test"
 	},
 	"dependencies": {
-		"@orkestrel/contract": "^0.0.11",
-		"@orkestrel/emitter": "^0.0.6"
+		"@orkestrel/contract": "^0.0.12",
+		"@orkestrel/emitter": "^0.0.7"
 	},
 	"devDependencies": {
 		"@microsoft/api-extractor": "^7.58.12",
 		"@orkestrel/guide": "^0.0.11",
 		"@orkestrel/scaffold": "^0.0.38",
-		"@orkestrel/test": "^0.0.5",
+		"@orkestrel/test": "^0.0.6",
 		"@types/node": "^26.1.2",
 		"@vitest/browser-playwright": "^4.1.10",
 		"oxfmt": "^0.62.0",
