@@ -108,7 +108,7 @@ export class SEA implements SEAInterface {
 			const compression = this.#compress(root)
 
 			this.#check()
-			const blob = this.#blob(root)
+			const blob = this.#blob(root, compression)
 
 			this.#check()
 			const assembled = this.#assemble(root, blob)
@@ -231,7 +231,7 @@ export class SEA implements SEAInterface {
 		return manifest
 	}
 
-	#blob(root: string): string {
+	#blob(root: string, compression: SEACompressionManifest | undefined): string {
 		const entry = resolve(root, this.#options.entry.path)
 		ensureExists(entry, `Entry not found: ${this.#options.entry.path}`, 'ENTRY')
 
@@ -246,7 +246,7 @@ export class SEA implements SEAInterface {
 				...(this.#options.entry.format === undefined ? {} : { format: this.#options.entry.format }),
 			},
 			blob,
-			this.#assets(root),
+			this.#assets(root, compression),
 			this.#options.blob,
 		)
 
@@ -419,10 +419,19 @@ export class SEA implements SEAInterface {
 		}
 	}
 
-	#assets(root: string): Readonly<Record<string, string>> {
+	#assets(
+		root: string,
+		compression: SEACompressionManifest | undefined,
+	): Readonly<Record<string, string>> {
+		const outputs = new Map<string, string>()
+		for (const result of compression?.assets ?? []) {
+			outputs.set(result.input, result.output)
+		}
+
 		const assets: Record<string, string> = {}
 		for (const [name, path] of Object.entries(this.#options.assets ?? {})) {
-			assets[name] = ensureContained(root, path)
+			const input = ensureContained(root, path)
+			assets[name] = outputs.get(input) ?? input
 		}
 		return assets
 	}

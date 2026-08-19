@@ -3,6 +3,7 @@
 // is slow (~100MB copy + subprocess) and environment-dependent, so they are
 // kept OUT of the default `test` run and live in this dedicated, opt-in
 // `integration` project instead (run via `npm run test:integration`).
+import type { SEACompressionManifest } from '@src/server'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createSEA, isSEAError, SEA } from '@src/server'
@@ -103,6 +104,67 @@ describe('seal integration', () => {
 					disableExperimentalSEAWarning: true,
 					useCodeCache: true,
 					useSnapshot: false,
+				})
+
+				seal.destroy()
+			},
+		)
+	}, 120000)
+
+	it('embeds compressed asset outputs under original keys without mutating asset options', async () => {
+		await withTestDir(
+			{
+				'entry.cjs': "console.log('hello from seal')\n",
+				'assets/index.html': '<main>compressed client</main>',
+				'assets/logo.png': 'uncompressed image',
+			},
+			async (scratch) => {
+				const controller = new AbortController()
+				const assets = {
+					'index.html': 'assets/index.html',
+					'logo.png': 'assets/logo.png',
+				}
+				const reports: SEACompressionManifest[] = []
+				const seal = createSEA(
+					createSEAOptions({
+						root: scratch.path,
+						assets,
+						compression: { paths: ['assets'], mode: 'text' },
+						signal: controller.signal,
+						on: {
+							compress: (report) => {
+								if (report !== undefined) reports.push(report)
+							},
+							blob: () => {
+								controller.abort()
+							},
+						},
+					}),
+				)
+
+				const error: unknown = await seal.execute().then(
+					() => undefined,
+					(thrown: unknown) => thrown,
+				)
+				expect(isSEAError(error)).toBe(true)
+				expect(isSEAError(error) && error.code).toBe('ABORT')
+				expect(scratch.has('dist/sea-prep.blob')).toBe(true)
+
+				const input = join(scratch.path, 'assets', 'index.html')
+				const output = `${input}.br`
+				expect(reports).toHaveLength(1)
+				expect(reports[0]).toMatchObject({ assets: [{ input, output }] })
+
+				const config: unknown = JSON.parse(requireValue(scratch.read('dist/sea-config.json')))
+				expect(config).toMatchObject({
+					assets: {
+						'index.html': output,
+						'logo.png': join(scratch.path, 'assets', 'logo.png'),
+					},
+				})
+				expect(assets).toEqual({
+					'index.html': 'assets/index.html',
+					'logo.png': 'assets/logo.png',
 				})
 
 				seal.destroy()

@@ -318,7 +318,9 @@ export type SEAEventMap = {
  * `name`        — output executable name (no extension).
  * `entry`       — the entry point to embed (path and module format).
  * `output`      — directory for the final executable.
- * `assets`      — key→path mapping for SEA embedded assets.
+ * `assets`      — key→path mapping for SEA embedded assets. When compression
+ * writes a mapped path's Brotli output, the blob embeds that output under the
+ * original key without mutating this record. Other entries keep their paths.
  * `compression` — directories to Brotli-compress before embedding.
  * `windows`     — Windows-specific build options (console/GUI terminal).
  * `root`        — project root directory. Default: `process.cwd()`.

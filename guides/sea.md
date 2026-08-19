@@ -24,6 +24,8 @@ process.stdout.write(
 
 `sea.execute()` runs the three-step pipeline — compress assets, generate the blob, assemble and sign the executable — and transitions `sea.status` from `'idle'` to `'active'` to `'done'` (or `'error'`). `sea.emitter` reports progress on `compress`, `progress` (once per compressed file, with `current`/`total` counts), `blob`, `assemble`, and `complete`.
 
+When an `assets` path is compressed by `compression`, blob generation embeds the Brotli output under that asset's original key. Uncompressed entries keep their original paths, the compression manifest still reports each output path, and SEA does not mutate the caller's `assets` record.
+
 On Windows, `SEAOptions.windows.terminal` (default `true`) selects whether the executable keeps its console window: `false` builds a GUI-subsystem binary that launches without a terminal, at the cost of detached stdio when no console is attached (console output is discarded).
 
 On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When present, the assembled executable is signed with `signtool` (cert `file` + `password`, or a store `thumbprint` — exactly one of the two) and verified as the LAST content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`), matching prior behavior exactly. `createSignCommand` builds the `signtool` argv and is available standalone.
