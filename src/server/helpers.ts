@@ -30,7 +30,7 @@ import {
 } from 'node:fs'
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
 import { resolve, relative, join, extname, isAbsolute, sep, dirname } from 'node:path'
-import { execFileSync, spawn } from 'node:child_process'
+import { detach, runSync } from '@orkestrel/process/server'
 import {
 	BROTLI_EXTENSION,
 	DEFAULT_SEA_COMPRESSION_QUALITY,
@@ -168,34 +168,37 @@ export function runShell(command: string[], options?: SEAShellOptions): Buffer {
 	if (options?.signal?.aborted === true) {
 		throw new SEAError('ABORT', 'Shell command aborted', { command: redactCommand(command) })
 	}
-	// Node v22+ blocks direct execFileSync of .cmd/.bat files without a shell (EINVAL)
-	const useShell = cmd.endsWith('.cmd') || cmd.endsWith('.bat')
-	try {
-		return execFileSync(cmd, args, {
-			cwd: options?.cwd,
-			env: options?.env !== undefined ? { ...process.env, ...options.env } : undefined,
-			stdio: ['pipe', 'pipe', 'pipe'],
-			shell: useShell,
+	// `runSync` resolves a Windows `.cmd`/`.bat` target itself, running it through
+	// an explicitly quoted `cmd.exe /d /s /c` command line rather than a shell, and
+	// captures both streams. `strict: false` returns the outcome so the failure is
+	// mapped onto this module's coded errors.
+	const result = runSync(
+		{
+			file: cmd,
+			arguments: args,
+			...(options?.env !== undefined ? { environment: options.env } : {}),
+		},
+		{
+			...(options?.cwd !== undefined ? { workspace: options.cwd } : {}),
+			...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
+			strict: false,
+		},
+	)
+	if (result.expired) {
+		throw new SEAError('TIMEOUT', 'Shell command timed out', {
+			command: redactCommand(command),
 			timeout: options?.timeout,
 		})
-	} catch (thrown: unknown) {
-		if (!(thrown instanceof Error)) {
-			throw thrown
-		}
-		const redacted = redactCommand(command)
-		const code = 'code' in thrown && typeof thrown.code === 'string' ? thrown.code : undefined
-		if (code === 'ETIMEDOUT') {
-			throw new SEAError('TIMEOUT', 'Shell command timed out', {
-				command: redacted,
-				timeout: options?.timeout,
-			})
-		}
-		const stdout =
-			'stdout' in thrown && Buffer.isBuffer(thrown.stdout) ? thrown.stdout : Buffer.alloc(0)
-		const stderr =
-			'stderr' in thrown && Buffer.isBuffer(thrown.stderr) ? thrown.stderr : Buffer.alloc(0)
-		throw new ShellError('Command failed: ' + redacted.join(' '), stdout, stderr)
 	}
+	if (result.failed) {
+		const redacted = redactCommand(command)
+		throw new ShellError(
+			'Command failed: ' + redacted.join(' '),
+			Buffer.from(result.stdout, 'utf-8'),
+			Buffer.from(result.stderr, 'utf-8'),
+		)
+	}
+	return Buffer.from(result.stdout, 'utf-8')
 }
 
 // === Compression Helpers
@@ -976,13 +979,14 @@ export function patchSentinelFuse(executable: string, fuse: string): void {
  * A best-effort launch for bundled local-UI apps: dispatches by
  * `process.platform` (`win32` -> `rundll32 url.dll,FileProtocolHandler`,
  * `darwin` -> `open`, else -> `xdg-open`), each invoked with an argv array
- * (never a shell) so the URL cannot be interpreted as a flag or injected
- * into a command line. The child process is spawned `detached` with
- * `stdio: 'ignore'` and immediately `unref()`d so it never keeps the host
- * app alive. Only `http:` and `https:` URLs are accepted — any other
- * scheme (including a string that merely looks like a CLI flag, e.g.
- * `'-e ...'`) fails to parse as an http(s) URL and is rejected before
- * anything is spawned.
+ * through `@orkestrel/process`'s `detach` (never a shell) so the URL cannot be
+ * interpreted as a flag or injected into a command line. `detach` spawns the
+ * child detached, with its stdio discarded and unreferenced, so the opener
+ * outlives the host app and never keeps it alive, and it swallows the async
+ * host fault an absent opener binary raises. Only `http:` and `https:` URLs
+ * are accepted — any other scheme (including a string that merely looks like a
+ * CLI flag, e.g. `'-e ...'`) fails to parse as an http(s) URL and is rejected
+ * before anything is spawned.
  *
  * @param url - Absolute http or https URL to open
  * @throws SEAError with code `'BROWSER'` when `url` is not a parseable absolute URL
@@ -1008,21 +1012,18 @@ export function openBrowser(url: string): void {
 		})
 	}
 
-	const child =
+	const command =
 		process.platform === 'win32'
-			? spawn('rundll32', ['url.dll,FileProtocolHandler', parsed.href], {
-					detached: true,
-					stdio: 'ignore',
-				})
+			? { file: 'rundll32', arguments: ['url.dll,FileProtocolHandler', parsed.href] }
 			: process.platform === 'darwin'
-				? spawn('open', [parsed.href], { detached: true, stdio: 'ignore' })
-				: spawn('xdg-open', [parsed.href], { detached: true, stdio: 'ignore' })
+				? { file: 'open', arguments: [parsed.href] }
+				: { file: 'xdg-open', arguments: [parsed.href] }
 
-	// Best-effort launch: if the target browser opener binary is absent, the
-	// child emits an async 'error' (ENOENT) event. There is nothing to recover
-	// here (unlike the build pipeline, there is no coded failure to surface to
-	// a caller who has already returned) — an unhandled 'error' event would
-	// otherwise crash the host app, so this is a deliberate, documented no-op.
-	child.on('error', () => {})
-	child.unref()
+	// Best-effort fire-and-forget launch: `detach` refuses only a structurally
+	// invalid command (an empty file name or a NUL character), which neither the
+	// literal opener names nor a parsed http(s) `href` can carry, so the coded
+	// `invalid` failure is unreachable from here. An absent opener binary raises
+	// an async host fault instead, which `detach` swallows — a deliberate,
+	// documented no-op, because there is no caller left to surface it to.
+	detach(command)
 }
