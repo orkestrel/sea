@@ -3,8 +3,7 @@
 // `document` / `window`: node-only helpers live in `setupServer.ts`.
 //
 // The fleet-wide helpers live in `@orkestrel/test`. What remains here is what
-// is specific to this package: asset content encoding and the browser-Vue
-// path predicate.
+// is specific to this package: asset content encoding.
 
 /**
  * Encode `text` as UTF-8 into a freshly allocated `ArrayBuffer` — the asset-content shape

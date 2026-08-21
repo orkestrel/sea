@@ -7,7 +7,7 @@ import type { InjectorOptions, SEAOptions } from '@src/server'
 import type { ScratchInterface } from '@orkestrel/test/server'
 import { fileURLToPath } from 'node:url'
 import { resolveRoot } from '@orkestrel/test'
-import { createScratch } from '@orkestrel/test/server'
+import { createScratch, destroyScratch } from '@orkestrel/test/server'
 import {
 	ELF_CLASS_64,
 	ELF_DATA_LSB,
@@ -31,9 +31,15 @@ export const WORKSPACE_ROOT = fileURLToPath(resolveRoot(import.meta))
  * temp directory — NOT anchored under `WORKSPACE_ROOT`, since a seal build
  * writes a real executable that must never land in source control.
  *
+ * Teardown goes through `destroyScratch` rather than `ScratchInterface.destroy` because a seal
+ * build spawns shell commands rooted at the allocation, and a host holds that directory for a
+ * short interval after the command that held it exits. `destroy` attempts removal exactly once
+ * and throws on that hold; `destroyScratch` retries within a budget until the host lets go.
+ *
  * @param files - Record of relative path to file content, written before `fn` runs
  * @param fn - Callback receiving the allocated {@link ScratchInterface}
  * @returns The callback's return value
+ * @throws The callback's own error, or an `Error` when the host never releases the allocation.
  */
 export async function withTestDir<T>(
 	files: Record<string, string>,
@@ -43,7 +49,7 @@ export async function withTestDir<T>(
 	try {
 		return await fn(scratch)
 	} finally {
-		scratch.destroy()
+		await destroyScratch(scratch)
 	}
 }
 
