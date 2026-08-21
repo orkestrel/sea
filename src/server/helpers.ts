@@ -30,7 +30,7 @@ import {
 } from 'node:fs'
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
 import { resolve, relative, join, extname, isAbsolute, sep, dirname } from 'node:path'
-import { detach, runSync } from '@orkestrel/process/server'
+import { detach, executeSync } from '@orkestrel/process/server'
 import {
 	BROTLI_EXTENSION,
 	DEFAULT_SEA_COMPRESSION_QUALITY,
@@ -168,11 +168,11 @@ export function runShell(command: string[], options?: SEAShellOptions): Buffer {
 	if (options?.signal?.aborted === true) {
 		throw new SEAError('ABORT', 'Shell command aborted', { command: redactCommand(command) })
 	}
-	// `runSync` resolves a Windows `.cmd`/`.bat` target itself, running it through
-	// an explicitly quoted `cmd.exe /d /s /c` command line rather than a shell, and
-	// captures both streams. `strict: false` returns the outcome so the failure is
+	// `executeSync` spawns through the process package's own resolver and never through a
+	// shell, and it refuses a batch-bound argument as `invalid` rather than passing it on.
+	// Both streams are captured. `strict: false` returns the outcome so the failure is
 	// mapped onto this module's coded errors.
-	const result = runSync(
+	const result = executeSync(
 		{
 			file: cmd,
 			arguments: args,
