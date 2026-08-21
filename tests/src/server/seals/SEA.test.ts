@@ -83,6 +83,53 @@ describe('SEA', () => {
 		)
 	})
 
+	it('completes spawned shell commands within a generous timeout', async () => {
+		await withTestDir(
+			{
+				'entry.cjs': "console.log('hello from seal')\n",
+			},
+			async (scratch) => {
+				const seal = new SEA(
+					createSEAOptions({
+						root: scratch.path,
+						timeout: 30_000,
+					}),
+				)
+
+				const result = await seal.execute()
+
+				expect(result.size).toBeGreaterThan(0)
+				expect(seal.status).toBe('done')
+				seal.destroy()
+			},
+		)
+	}, 30_000)
+
+	it('surfaces TIMEOUT when a spawned shell command exceeds its timeout', async () => {
+		await withTestDir(
+			{
+				'entry.cjs': "console.log('hello from seal')\n",
+			},
+			async (scratch) => {
+				const seal = new SEA(
+					createSEAOptions({
+						root: scratch.path,
+						timeout: 1,
+					}),
+				)
+
+				const error: unknown = await seal.execute().then(
+					() => undefined,
+					(thrown: unknown) => thrown,
+				)
+
+				expect(isSEAError(error) && error.code).toBe('TIMEOUT')
+				expect(seal.status).toBe('error')
+				seal.destroy()
+			},
+		)
+	}, 30_000)
+
 	it('aborts mid-pipeline without touching an existing output', async () => {
 		await withTestDir(
 			{

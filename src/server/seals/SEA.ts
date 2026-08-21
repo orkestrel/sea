@@ -254,6 +254,7 @@ export class SEA implements SEAInterface {
 		runShell([process.execPath, '--experimental-sea-config', configPath], {
 			cwd: output,
 			...(this.#options.signal === undefined ? {} : { signal: this.#options.signal }),
+			...(this.#options.timeout === undefined ? {} : { timeout: this.#options.timeout }),
 		})
 
 		if (!existsSync(blob)) {
@@ -284,7 +285,10 @@ export class SEA implements SEAInterface {
 		const name = process.platform === 'win32' ? `${this.#options.name}.exe` : this.#options.name
 		const finalOutput = join(output, name)
 		const temp = join(output, `.${this.#options.name}-${randomUUID()}.tmp${ext}`)
-		const shell = this.#options.signal === undefined ? {} : { signal: this.#options.signal }
+		const shell = {
+			...(this.#options.signal === undefined ? {} : { signal: this.#options.signal }),
+			...(this.#options.timeout === undefined ? {} : { timeout: this.#options.timeout }),
+		}
 
 		let signed = false
 		let stripped = false

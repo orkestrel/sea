@@ -325,6 +325,7 @@ export type SEAEventMap = {
  * `windows`     — Windows-specific build options (console/GUI terminal).
  * `root`        — project root directory. Default: `process.cwd()`.
  * `signal`      — an `AbortSignal` that cancels the build in progress.
+ * `timeout`     — milliseconds allowed for each spawned shell command. Omit to disable the timeout.
  * `blob`        — options controlling generated SEA blob behavior.
  */
 export interface SEAOptions {
@@ -338,6 +339,7 @@ export interface SEAOptions {
 	readonly windows?: SEAWindowsOptions
 	readonly root?: string
 	readonly signal?: AbortSignal
+	readonly timeout?: number
 	readonly blob?: SEABlobOptions
 }
 

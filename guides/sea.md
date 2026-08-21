@@ -14,6 +14,7 @@ const sea = createSEA({
 	assets: { 'model.gguf': 'models/model.gguf' },
 	compression: { paths: ['dist/app/browser'], mode: 'text' },
 	windows: { terminal: false },
+	timeout: 30_000,
 })
 
 const result = await sea.execute()
@@ -31,6 +32,8 @@ On Windows, `SEAOptions.windows.terminal` (default `true`) selects whether the e
 On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When present, the assembled executable is signed with `signtool` (cert `file` + `password`, or a store `thumbprint` — exactly one of the two) and verified as the LAST content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`), matching prior behavior exactly. `createSignCommand` builds the `signtool` argv and is available standalone.
 
 `SEAOptions.entry` is a `SEAEntryOptions` object (`{ path, format? }`) rather than a bare path — `format` selects the entry module format (`'cjs'` default, or `'esm'` on Node >= 25.7). Every domain failure throws a `SEAError` carrying a machine-readable `SEAErrorCode`; narrow a caught value with `isSEAError`. `SEAResult` additionally reports `signed`, `stripped`, and the patched `terminal` flag (Windows only).
+
+`SEAOptions.timeout` bounds each spawned blob-generation, stripping, signing, and verification command in milliseconds. Omit it to leave those commands unbounded.
 
 ## Surface
 
@@ -156,7 +159,7 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `SEAEntryOptions`        | interface | Options describing the SEA entry point (path and module format).             |
 | `SEABlobOptions`         | interface | Options controlling generated SEA blob behavior (cache, snapshot).           |
 | `SEAEventMap`            | type      | Events emitted by a `SEAInterface`.                                          |
-| `SEAOptions`             | interface | Options for creating a SEA build.                                            |
+| `SEAOptions`             | interface | Options for creating a SEA build, including a per-command timeout.           |
 | `SEAWindowsOptions`      | interface | Windows-specific SEA build options.                                          |
 | `SEAWindowsSignOptions`  | interface | Windows Authenticode signing options, passed through to `signtool`.          |
 | `SEAResult`              | interface | Result of a successful seal build (adds `signed`, `stripped`, `terminal`).   |
