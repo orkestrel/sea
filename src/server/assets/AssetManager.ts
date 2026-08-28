@@ -1,11 +1,3 @@
-/**
- * AssetManager
- *
- * Named asset collection with SEA and disk loading.
- * In SEA mode, embedded assets are loaded automatically at construction.
- * In development, `load()` reads client assets from disk.
- */
-
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { getAssetKeys, getRawAsset, isSea } from 'node:sea'
@@ -27,7 +19,6 @@ import { Asset } from './Asset.js'
 export class AssetManager implements AssetManagerInterface {
 	readonly #emitter: Emitter<AssetManagerEventMap>
 	#assets = new Map<string, AssetInterface>()
-	#keys: string[] = []
 	readonly #root: string
 
 	constructor(options?: AssetManagerOptions) {
@@ -36,7 +27,7 @@ export class AssetManager implements AssetManagerInterface {
 			...(options?.on === undefined ? {} : { on: options.on }),
 			...(options?.error === undefined ? {} : { error: options.error }),
 		})
-		this.#loadSea()
+		this.#loadSEA()
 	}
 
 	get emitter(): EmitterInterface<AssetManagerEventMap> {
@@ -56,7 +47,7 @@ export class AssetManager implements AssetManagerInterface {
 	}
 
 	keys(): readonly string[] {
-		return [...this.#keys]
+		return [...this.#assets.keys()]
 	}
 
 	register(input: AssetInput | AssetInput[]): void {
@@ -112,7 +103,6 @@ export class AssetManager implements AssetManagerInterface {
 
 	clear(): void {
 		this.#assets.clear()
-		this.#keys = []
 		this.#emitter.emit('clear')
 	}
 
@@ -125,12 +115,9 @@ export class AssetManager implements AssetManagerInterface {
 
 	#add(asset: AssetInterface): void {
 		this.#assets.set(asset.key, asset)
-		if (!this.#keys.includes(asset.key)) {
-			this.#keys.push(asset.key)
-		}
 	}
 
-	#loadSea(): void {
+	#loadSEA(): void {
 		if (isSea()) {
 			const assetKeys: readonly string[] = getAssetKeys()
 			const registered: string[] = []

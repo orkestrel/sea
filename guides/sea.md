@@ -106,9 +106,16 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `computeSize`         | function | Compute a size comparison between original and compressed byte counts.          |
 | `compressFile`        | function | Brotli-compress a single file, writing the output alongside it.                 |
 | `compressDirectory`   | function | Compress all compressible files in a directory tree.                            |
+| `alignTo`             | function | Round a value up to the next multiple of an alignment boundary.                 |
 | `parsePEOffset`       | function | Parse the PE header offset from a Windows executable.                           |
 | `readU16`             | function | Read a 16-bit unsigned integer from a file descriptor.                          |
+| `readU32`             | function | Read a 32-bit unsigned little-endian integer from a file descriptor.            |
+| `readU64`             | function | Read a 64-bit unsigned little-endian integer from a file descriptor.            |
 | `writeU16`            | function | Write a 16-bit unsigned integer to a file descriptor.                           |
+| `writeU32`            | function | Write a 32-bit unsigned little-endian integer to a file descriptor.             |
+| `writeU64`            | function | Write a 64-bit unsigned little-endian integer to a file descriptor.             |
+| `appendFile`          | function | Append a source file to a target file, streaming in fixed-size chunks.          |
+| `stripTrailingNulls`  | function | Truncate a NUL-padded binary name field at its first NUL character.             |
 | `isPEExecutable`      | function | Check if a file is a Windows PE executable.                                     |
 | `patchPESubsystem`    | function | Patch the PE subsystem field in a Windows executable.                           |
 | `stripPESignature`    | function | Remove the Authenticode signature from a PE executable.                         |
@@ -257,7 +264,14 @@ import {
 	isExecutableFormat,
 	parsePEOffset,
 	readU16,
+	readU32,
+	readU64,
 	writeU16,
+	writeU32,
+	writeU64,
+	appendFile,
+	stripTrailingNulls,
+	alignTo,
 	isPEExecutable,
 	patchPESubsystem,
 	stripPESignature,
@@ -297,8 +311,13 @@ isExecutableFormat('elf') // true
 
 const fd = 0 // an open file descriptor from openSync in real usage
 // parsePEOffset(fd) / readU16(fd, offset) / writeU16(fd, offset, value)
+// readU32(fd, offset) / readU64(fd, offset) — 32- and 64-bit little-endian reads
+// writeU32(fd, offset, value) / writeU64(fd, offset, value) — the matching writes
 // isPEExecutable(path) / patchPESubsystem(path, subsystem) / stripPESignature(path)
 // patchSentinelFuse(executable, fuse)
+// appendFile('dist/sea/app', 'dist/sea/sea-prep.blob') — streams the blob onto the binary
+
+stripTrailingNulls('.rsrc\0\0\0') // '.rsrc' — a NUL-padded PE section name field
 
 ensureContained('/dist/app', 'browser') // real, symlink-resolved path inside the base root
 
@@ -312,6 +331,7 @@ syncDirectory('/dist/sea') // fsync a directory to durably persist a prior renam
 
 redactCommand(['signtool', 'sign', '/p', 'hunter2']) // ['signtool', 'sign', '/p', '***']
 alignELFNoteSize(10) // 12 — the next four-byte ELF note boundary
+alignTo(4097, 4096) // 8192 — the general form behind every format's alignment
 isPowerOfTwo(4096) // true
 ```
 

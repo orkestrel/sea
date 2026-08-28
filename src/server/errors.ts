@@ -3,7 +3,7 @@ import type { SEAErrorCode } from './types.js'
 // Error surface for the seal build. `SEAError` is the coded base every
 // domain failure throws through, so a caller can branch on `code` rather
 // than parsing a message string. `ShellError` specializes it for the shell
-// boundary — `runShell` maps a failed `execFileSync` invocation to a
+// boundary — `runShell` maps a failed `executeSync` invocation to a
 // `ShellError` carrying the captured stdout/stderr, so a caller can inspect
 // the process output rather than parsing the thrown message.
 

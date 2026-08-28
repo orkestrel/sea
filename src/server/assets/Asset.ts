@@ -1,10 +1,3 @@
-/**
- * Asset
- *
- * A single named asset wrapping its key, content buffer, and compression flag.
- * Infers compression from the `.br` extension when not explicitly provided.
- */
-
 import type { AssetInput, AssetInterface } from '../types.js'
 import { BROTLI_EXTENSION } from '../constants.js'
 

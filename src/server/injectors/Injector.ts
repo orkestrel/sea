@@ -1,9 +1,4 @@
 /**
- * Injector
- *
- * Cross-platform binary resource injector for PE, ELF, and Mach-O executables.
- * Pure TypeScript file I/O — no WASM, no external tools, no size ceiling.
- *
  * PE  — adds an RT_RCDATA resource via resource directory rebuild.
  * ELF — appends a PT_NOTE segment with the blob as note data.
  * Mach-O — appends an LC_SEGMENT_64 load command with a section.
@@ -45,11 +40,20 @@ import {
 	MACHO_LC_SEGMENT_64,
 } from '../constants.js'
 import {
-	patchSentinelFuse,
+	alignTo,
+	appendFile,
 	buildELFNoteHeader,
-	finalizeExecutable,
 	copyRange,
+	finalizeExecutable,
 	isPowerOfTwo,
+	patchSentinelFuse,
+	readU16,
+	readU32,
+	readU64,
+	stripTrailingNulls,
+	writeU16,
+	writeU32,
+	writeU64,
 } from '../helpers.js'
 import { SEAError } from '../errors.js'
 
@@ -72,13 +76,13 @@ export class Injector implements InjectorInterface {
 		let peOptionalOffset: number | undefined
 		switch (this.#format) {
 			case 'pe':
-				peOptionalOffset = this.#injectPe()
+				peOptionalOffset = this.#injectPE()
 				break
 			case 'elf':
-				this.#injectElf()
+				this.#injectELF()
 				break
 			case 'macho':
-				this.#injectMacho()
+				this.#injectMachO()
 				break
 		}
 
@@ -155,12 +159,12 @@ export class Injector implements InjectorInterface {
 	//
 	// The blob data is streamed from disk — never held in memory.
 
-	#injectPe(): number {
+	#injectPE(): number {
 		const fd = openSync(this.#options.executable, 'r+')
 		try {
 			// --- Parse PE headers ---
-			const peOffset = this.#readU32(fd, 0x3c)
-			const sig = this.#readU32(fd, peOffset)
+			const peOffset = readU32(fd, 0x3c)
+			const sig = readU32(fd, peOffset)
 			if (sig !== PE_SIGNATURE) {
 				throw new SEAError('FORMAT', 'Invalid PE signature', {
 					executable: this.#options.executable,
@@ -169,11 +173,11 @@ export class Injector implements InjectorInterface {
 			}
 
 			const coffOffset = peOffset + 4
-			const numberOfSections = this.#readU16(fd, coffOffset + 2)
-			const optionalHeaderSize = this.#readU16(fd, coffOffset + 16)
+			const numberOfSections = readU16(fd, coffOffset + 2)
+			const optionalHeaderSize = readU16(fd, coffOffset + 16)
 			const optionalOffset = coffOffset + 20
 
-			const optMagic = this.#readU16(fd, optionalOffset)
+			const optMagic = readU16(fd, optionalOffset)
 			const is64 = optMagic === PE32_PLUS_MAGIC
 			if (optMagic !== PE32_MAGIC && optMagic !== PE32_PLUS_MAGIC) {
 				throw new SEAError(
@@ -183,8 +187,8 @@ export class Injector implements InjectorInterface {
 				)
 			}
 
-			const sectionAlignment = this.#readU32(fd, optionalOffset + 32)
-			const fileAlignment = this.#readU32(fd, optionalOffset + 36)
+			const sectionAlignment = readU32(fd, optionalOffset + 32)
+			const fileAlignment = readU32(fd, optionalOffset + 36)
 			this.#ensureValidPEAlignment(sectionAlignment, fileAlignment)
 
 			// SizeOfImage offset: same in PE32 and PE32+
@@ -197,7 +201,7 @@ export class Injector implements InjectorInterface {
 			// Resource table is data directory entry index 2
 			const resourceDirRvaOffset = dataDirOffset + 2 * 8
 			const resourceDirSizeOffset = resourceDirRvaOffset + 4
-			const existingResourceRva = this.#readU32(fd, resourceDirRvaOffset)
+			const existingResourceRVA = readU32(fd, resourceDirRvaOffset)
 
 			// --- Parse section table ---
 			const sectionTableOffset = optionalOffset + optionalHeaderSize
@@ -219,12 +223,12 @@ export class Injector implements InjectorInterface {
 				const off = sectionTableOffset + i * PE_SECTION_HEADER_SIZE
 				const nameBuf = Buffer.alloc(8)
 				readSync(fd, nameBuf, 0, 8, off)
-				const name = this.#stripTrailingNulls(nameBuf.toString('ascii'))
-				const virtualSize = this.#readU32(fd, off + 8)
-				const virtualAddress = this.#readU32(fd, off + 12)
-				const rawSize = this.#readU32(fd, off + 16)
-				const rawOffset = this.#readU32(fd, off + 20)
-				const characteristics = this.#readU32(fd, off + 36)
+				const name = stripTrailingNulls(nameBuf.toString('ascii'))
+				const virtualSize = readU32(fd, off + 8)
+				const virtualAddress = readU32(fd, off + 12)
+				const rawSize = readU32(fd, off + 16)
+				const rawOffset = readU32(fd, off + 20)
+				const characteristics = readU32(fd, off + 36)
 
 				sections.push({
 					name,
@@ -237,8 +241,8 @@ export class Injector implements InjectorInterface {
 				})
 
 				if (
-					existingResourceRva >= virtualAddress &&
-					existingResourceRva < virtualAddress + Math.max(virtualSize, rawSize)
+					existingResourceRVA >= virtualAddress &&
+					existingResourceRVA < virtualAddress + Math.max(virtualSize, rawSize)
 				) {
 					rsrcSectionIndex = i
 				}
@@ -272,17 +276,17 @@ export class Injector implements InjectorInterface {
 				nameName: string | undefined
 				language: number
 				codePage: number
-				dataRva: number
+				dataRVA: number
 				dataSize: number
 			}> = []
 
-			if (rsrcSectionIndex !== -1 && existingResourceRva !== 0) {
+			if (rsrcSectionIndex !== -1 && existingResourceRVA !== 0) {
 				const rsrc = sections[rsrcSectionIndex]
 				if (rsrc !== undefined) {
 					this.#parseResourceDirectory(
 						fd,
 						rsrc.rawOffset,
-						existingResourceRva,
+						existingResourceRVA,
 						0,
 						existingLeaves,
 						0,
@@ -310,7 +314,7 @@ export class Injector implements InjectorInterface {
 				const leaf = filteredLeaves[i]
 				if (leaf === undefined) continue
 				// Convert data RVA to file offset
-				const fileOffset = this.#rvaToFileOffset(leaf.dataRva, sections)
+				const fileOffset = this.#rvaToFileOffset(leaf.dataRVA, sections)
 				if (fileOffset >= 0) {
 					const buf = Buffer.alloc(leaf.dataSize)
 					readSync(fd, buf, 0, leaf.dataSize, fileOffset)
@@ -333,7 +337,7 @@ export class Injector implements InjectorInterface {
 
 			// Total section raw size = directory + data region (existing data + blob)
 			const totalRawSize = directoryBuffer.length + dataRegionSize
-			const alignedRawSize = this.#align(totalRawSize, fileAlignment)
+			const alignedRawSize = alignTo(totalRawSize, fileAlignment)
 
 			// --- Determine new section placement ---
 			// Virtual address: highest VA end of all sections, aligned
@@ -342,12 +346,12 @@ export class Injector implements InjectorInterface {
 				const end = s.virtualAddress + Math.max(s.virtualSize, s.rawSize)
 				if (end > highestVaEnd) highestVaEnd = end
 			}
-			const newVa = this.#align(highestVaEnd, sectionAlignment)
+			const newVa = alignTo(highestVaEnd, sectionAlignment)
 			const newVirtualSize = totalRawSize
 
 			// File offset: end of file, aligned
 			const fileSize = statSync(this.#options.executable).size
-			const newRawOffset = this.#align(fileSize, fileAlignment)
+			const newRawOffset = alignTo(fileSize, fileAlignment)
 
 			// --- Write new section header ---
 			const newHeaderOffset = sectionTableEnd
@@ -369,18 +373,18 @@ export class Injector implements InjectorInterface {
 
 			// --- Update PE headers ---
 			// NumberOfSections
-			this.#writeU16(fd, coffOffset + 2, numberOfSections + 1)
+			writeU16(fd, coffOffset + 2, numberOfSections + 1)
 
 			// Resource data directory → point to new section
-			this.#writeU32(fd, resourceDirRvaOffset, newVa)
-			this.#writeU32(fd, resourceDirSizeOffset, directoryBuffer.length)
+			writeU32(fd, resourceDirRvaOffset, newVa)
+			writeU32(fd, resourceDirSizeOffset, directoryBuffer.length)
 
 			// SizeOfImage — must cover the new section
-			const newSizeOfImage = this.#align(
+			const newSizeOfImage = alignTo(
 				newVa + Math.max(newVirtualSize, alignedRawSize),
 				sectionAlignment,
 			)
-			this.#writeU32(fd, sizeOfImageOffset, newSizeOfImage)
+			writeU32(fd, sizeOfImageOffset, newSizeOfImage)
 
 			closeSync(fd)
 
@@ -393,7 +397,7 @@ export class Injector implements InjectorInterface {
 			}
 
 			// Fixup RVAs in the directory buffer: add newVa as base
-			this.#fixupDirectoryRvas(directoryBuffer, newVa)
+			this.#fixupDirectoryRVAs(directoryBuffer, newVa)
 
 			// Write the directory buffer
 			appendFileSync(this.#options.executable, directoryBuffer)
@@ -404,7 +408,7 @@ export class Injector implements InjectorInterface {
 				if (data !== undefined) {
 					appendFileSync(this.#options.executable, data)
 					// Pad to DWORD alignment
-					const padLen = this.#align(data.length, 4) - data.length
+					const padLen = alignTo(data.length, 4) - data.length
 					if (padLen > 0) {
 						appendFileSync(this.#options.executable, Buffer.alloc(padLen))
 					}
@@ -412,7 +416,7 @@ export class Injector implements InjectorInterface {
 			}
 
 			// Stream the blob from disk
-			this.#appendFile(this.#options.executable, this.#options.blob)
+			appendFile(this.#options.executable, this.#options.blob)
 
 			// Pad the section to aligned raw size
 			const writtenSize = statSync(this.#options.executable).size - newRawOffset
@@ -448,7 +452,7 @@ export class Injector implements InjectorInterface {
 			nameName: string | undefined
 			language: number
 			codePage: number
-			dataRva: number
+			dataRVA: number
 			dataSize: number
 		}>,
 		depth: number,
@@ -460,14 +464,14 @@ export class Injector implements InjectorInterface {
 		const absOffset = sectionFileOffset + dirOffset
 
 		// IMAGE_RESOURCE_DIRECTORY: 16 bytes
-		const numNamedEntries = this.#readU16(fd, absOffset + 12)
-		const numIdEntries = this.#readU16(fd, absOffset + 14)
+		const numNamedEntries = readU16(fd, absOffset + 12)
+		const numIdEntries = readU16(fd, absOffset + 14)
 		const totalEntries = numNamedEntries + numIdEntries
 
 		for (let i = 0; i < totalEntries; i++) {
 			const entryOffset = absOffset + PE_RESOURCE_DIR_SIZE + i * PE_RESOURCE_ENTRY_SIZE
-			const nameOrId = this.#readU32(fd, entryOffset)
-			const offsetOrData = this.#readU32(fd, entryOffset + 4)
+			const nameOrId = readU32(fd, entryOffset)
+			const offsetOrData = readU32(fd, entryOffset + 4)
 
 			// Resolve name or ID
 			let entryId = 0
@@ -513,9 +517,9 @@ export class Injector implements InjectorInterface {
 			} else {
 				// Data entry (leaf)
 				const dataEntryFileOffset = sectionFileOffset + offsetOrData
-				const dataRva = this.#readU32(fd, dataEntryFileOffset)
-				const dataSize = this.#readU32(fd, dataEntryFileOffset + 4)
-				const codePage = this.#readU32(fd, dataEntryFileOffset + 8)
+				const dataRVA = readU32(fd, dataEntryFileOffset)
+				const dataSize = readU32(fd, dataEntryFileOffset + 4)
+				const codePage = readU32(fd, dataEntryFileOffset + 8)
 
 				const language = depth === 2 ? entryId : 0
 
@@ -526,7 +530,7 @@ export class Injector implements InjectorInterface {
 					nameName,
 					language,
 					codePage,
-					dataRva,
+					dataRVA,
 					dataSize,
 				})
 			}
@@ -575,7 +579,7 @@ export class Injector implements InjectorInterface {
 			nameName: string | undefined
 			language: number
 			codePage: number
-			dataRva: number
+			dataRVA: number
 			dataSize: number
 		}>,
 		blobName: string,
@@ -706,7 +710,7 @@ export class Injector implements InjectorInterface {
 				const str = typeKey.slice(2)
 				allStrings.push({ key: typeKey, value: str })
 				stringPoolSize += 2 + str.length * 2 // length (u16) + UTF-16LE chars
-				stringPoolSize = this.#align(stringPoolSize, 2) // WORD align strings
+				stringPoolSize = alignTo(stringPoolSize, 2) // WORD align strings
 			}
 
 			for (const [nameKey, langEntries] of nameMap) {
@@ -718,7 +722,7 @@ export class Injector implements InjectorInterface {
 					const str = nameKey.slice(2)
 					allStrings.push({ key: nameKey, value: str })
 					stringPoolSize += 2 + str.length * 2
-					stringPoolSize = this.#align(stringPoolSize, 2)
+					stringPoolSize = alignTo(stringPoolSize, 2)
 				}
 
 				for (const entry of langEntries) {
@@ -747,7 +751,7 @@ export class Injector implements InjectorInterface {
 			const data = leafDataMap.get(entry.leafIndex)
 			if (data !== undefined) {
 				leafFileOffsets.set(entry.leafIndex, dataRegionOffset)
-				dataRegionOffset += this.#align(data.length, 4)
+				dataRegionOffset += alignTo(data.length, 4)
 			}
 		}
 
@@ -769,7 +773,7 @@ export class Injector implements InjectorInterface {
 			buf.writeUInt16LE(value.length, stringPos)
 			buf.write(value, stringPos + 2, value.length * 2, 'utf16le')
 			stringPos += 2 + value.length * 2
-			stringPos = this.#align(stringPos, 2)
+			stringPos = alignTo(stringPos, 2)
 		}
 
 		// Sort tree entries: named entries first (sorted by name), then ID entries (sorted by ID)
@@ -895,7 +899,7 @@ export class Injector implements InjectorInterface {
 					}
 
 					// Store as relative offset from section start for now;
-					// #fixupDirectoryRvas will add the section VA
+					// #fixupDirectoryRVAs will add the section VA
 					buf.writeUInt32LE(dataOffset, dataEntryPos) // DataRVA (placeholder)
 					buf.writeUInt32LE(entry.dataSize, dataEntryPos + 4) // Size
 					buf.writeUInt32LE(entry.codePage, dataEntryPos + 8) // CodePage
@@ -910,10 +914,10 @@ export class Injector implements InjectorInterface {
 
 	// --- PE: fix up all data entry RVAs by adding the section's virtual address ---
 
-	#fixupDirectoryRvas(directoryBuffer: Buffer, sectionVa: number): void {
+	#fixupDirectoryRVAs(directoryBuffer: Buffer, sectionVA: number): void {
 		// Data entries are at the end of the directory buffer.
 		// Each is 16 bytes: DataRVA(4), Size(4), CodePage(4), Reserved(4)
-		// We need to find them and add sectionVa to the DataRVA field.
+		// We need to find them and add sectionVA to the DataRVA field.
 		//
 		// Data entries are pointed to by level-2 directory entries.
 		// Rather than re-walking the tree, we know that data entries are
@@ -931,10 +935,10 @@ export class Injector implements InjectorInterface {
 		// Actually the simplest: re-walk the level-2 directory entries to
 		// find the data entry offsets, then fix them up.
 
-		this.#fixupDataEntries(directoryBuffer, 0, 0, sectionVa)
+		this.#fixupDataEntries(directoryBuffer, 0, 0, sectionVA)
 	}
 
-	#fixupDataEntries(buf: Buffer, dirOffset: number, depth: number, sectionVa: number): void {
+	#fixupDataEntries(buf: Buffer, dirOffset: number, depth: number, sectionVA: number): void {
 		if (dirOffset + PE_RESOURCE_DIR_SIZE > buf.length) return
 
 		const namedCount = buf.readUInt16LE(dirOffset + 12)
@@ -950,12 +954,12 @@ export class Injector implements InjectorInterface {
 			if ((offsetOrData & PE_RESOURCE_SUBDIR_FLAG) !== 0) {
 				// Subdirectory — recurse
 				const subOffset = offsetOrData & ~PE_RESOURCE_SUBDIR_FLAG
-				this.#fixupDataEntries(buf, subOffset, depth + 1, sectionVa)
+				this.#fixupDataEntries(buf, subOffset, depth + 1, sectionVA)
 			} else {
 				// Data entry — fix up the RVA
 				if (offsetOrData + 4 <= buf.length) {
 					const currentRva = buf.readUInt32LE(offsetOrData)
-					buf.writeUInt32LE((currentRva + sectionVa) >>> 0, offsetOrData)
+					buf.writeUInt32LE((currentRva + sectionVA) >>> 0, offsetOrData)
 				}
 			}
 		}
@@ -966,7 +970,7 @@ export class Injector implements InjectorInterface {
 	// The classic Windows IMAGE checksum: sum the whole file as little-endian
 	// 16-bit words (the existing checksum's 4 bytes treated as zero), fold
 	// carries into a 16-bit accumulator, then add the file length. Streamed in
-	// chunks (like #appendFile) so a large SEA binary is never fully buffered.
+	// chunks (like `appendFile`) so a large SEA binary is never fully buffered.
 
 	#patchChecksum(optionalOffset: number): void {
 		const checksumOffset = optionalOffset + 64
@@ -1003,7 +1007,7 @@ export class Injector implements InjectorInterface {
 			sum = (sum & 0xffff) + (sum >>> 16)
 			const checksum = (sum + fileSize) >>> 0
 
-			this.#writeU32(fd, checksumOffset, checksum)
+			writeU32(fd, checksumOffset, checksum)
 		} finally {
 			closeSync(fd)
 		}
@@ -1037,7 +1041,7 @@ export class Injector implements InjectorInterface {
 	// Node.js SEA on Linux reads PT_NOTE segments via dl_iterate_phdr,
 	// searching for a note whose name matches the resource name.
 
-	#injectElf(): void {
+	#injectELF(): void {
 		const exePath = this.#options.executable
 		const resource = this.#options.resource
 		const overwrite = this.#options.overwrite !== false
@@ -1083,18 +1087,18 @@ export class Injector implements InjectorInterface {
 				})
 			}
 
-			phdrOffset = Number(this.#readU64(fd, 32)) // e_phoff
-			phdrEntrySize = this.#readU16(fd, 54) // e_phentsize
-			phdrCount = this.#readU16(fd, 56) // e_phnum
+			phdrOffset = Number(readU64(fd, 32)) // e_phoff
+			phdrEntrySize = readU16(fd, 54) // e_phentsize
+			phdrCount = readU16(fd, 56) // e_phnum
 
-			headers = this.#readElfProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
+			headers = this.#readELFProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
 
 			// Neutralize any stale PT_NOTE with a matching name so overwrite
 			// never leaves two competing "NODE_SEA*" notes visible to
 			// postject_find_resource — runtime skips any non-PT_NOTE entry.
 			for (const header of headers) {
 				if (header.type !== ELF_PT_NOTE) continue
-				const existingName = this.#readElfNoteName(fd, header.offset, header.filesz)
+				const existingName = this.#readELFNoteName(fd, header.offset, header.filesz)
 				if (existingName === undefined || !existingName.startsWith('NODE_SEA')) continue
 				if (!overwrite) {
 					throw new SEAError('INJECT', `Note with name "${resource}" already exists`, {
@@ -1118,21 +1122,21 @@ export class Injector implements InjectorInterface {
 			const end = header.vaddr + header.memsz
 			if (end > maxVaddrEnd) maxVaddrEnd = end
 		}
-		const regionVaddr = this.#align(maxVaddrEnd, PAGE)
+		const regionVaddr = alignTo(maxVaddrEnd, PAGE)
 
 		const blobSize = statSync(this.#options.blob).size
 		const { header: noteHeader, entryTotal: noteEntryTotal } = buildELFNoteHeader(
 			resource,
 			blobSize,
 		)
-		const noteAreaSize = this.#align(noteEntryTotal, 8)
+		const noteAreaSize = alignTo(noteEntryTotal, 8)
 
 		const newEntryCount = headers.length + 2
 		const phtSize = newEntryCount * phdrEntrySize
 		const regionSize = noteAreaSize + phtSize
 
 		const fileSize = statSync(exePath).size
-		const regionStart = this.#align(fileSize, PAGE)
+		const regionStart = alignTo(fileSize, PAGE)
 		const phtOff = regionStart + noteAreaSize
 
 		const newLoad = {
@@ -1182,7 +1186,7 @@ export class Injector implements InjectorInterface {
 		for (let i = 0; i < finalHeaders.length; i++) {
 			const entry = finalHeaders[i]
 			if (entry === undefined) continue
-			this.#writeElfProgramHeaderEntry(phtBuffer, i * phdrEntrySize, entry)
+			this.#writeELFProgramHeaderEntry(phtBuffer, i * phdrEntrySize, entry)
 		}
 
 		// --- Append the new region: note header + streamed blob + padding + PHT ---
@@ -1190,9 +1194,9 @@ export class Injector implements InjectorInterface {
 			appendFileSync(exePath, Buffer.alloc(regionStart - fileSize))
 		}
 		appendFileSync(exePath, noteHeader)
-		this.#appendFile(exePath, this.#options.blob)
+		appendFile(exePath, this.#options.blob)
 
-		const alignedDescSize = this.#align(blobSize, 4)
+		const alignedDescSize = alignTo(blobSize, 4)
 		const descPadding = alignedDescSize - blobSize
 		if (descPadding > 0) {
 			appendFileSync(exePath, Buffer.alloc(descPadding))
@@ -1208,13 +1212,13 @@ export class Injector implements InjectorInterface {
 		// --- Point the ELF header at the relocated, enlarged PHT ---
 		const fd2 = openSync(exePath, 'r+')
 		try {
-			this.#writeU64(fd2, 32, BigInt(phtOff))
-			this.#writeU16(fd2, 56, newEntryCount)
+			writeU64(fd2, 32, BigInt(phtOff))
+			writeU16(fd2, 56, newEntryCount)
 
 			// Build-time readback: locate the note the SAME way the runtime
 			// does (a PT_NOTE inside a PT_LOAD, address-congruent with its
 			// file offset) so a passing readback reflects runtime success.
-			this.#verifyElfNoteMapping(fd2, phtOff, newEntryCount, phdrEntrySize)
+			this.#verifyELFNoteMapping(fd2, phtOff, newEntryCount, phdrEntrySize)
 		} finally {
 			closeSync(fd2)
 		}
@@ -1222,7 +1226,7 @@ export class Injector implements InjectorInterface {
 
 	// --- ELF: read all program header entries into memory ---
 
-	#readElfProgramHeaders(
+	#readELFProgramHeaders(
 		fd: number,
 		phdrOffset: number,
 		entrySize: number,
@@ -1250,14 +1254,14 @@ export class Injector implements InjectorInterface {
 		for (let i = 0; i < count; i++) {
 			const off = phdrOffset + i * entrySize
 			headers.push({
-				type: this.#readU32(fd, off),
-				flags: this.#readU32(fd, off + 4),
-				offset: Number(this.#readU64(fd, off + 8)),
-				vaddr: Number(this.#readU64(fd, off + 16)),
-				paddr: Number(this.#readU64(fd, off + 24)),
-				filesz: Number(this.#readU64(fd, off + 32)),
-				memsz: Number(this.#readU64(fd, off + 40)),
-				align: Number(this.#readU64(fd, off + 48)),
+				type: readU32(fd, off),
+				flags: readU32(fd, off + 4),
+				offset: Number(readU64(fd, off + 8)),
+				vaddr: Number(readU64(fd, off + 16)),
+				paddr: Number(readU64(fd, off + 24)),
+				filesz: Number(readU64(fd, off + 32)),
+				memsz: Number(readU64(fd, off + 40)),
+				align: Number(readU64(fd, off + 48)),
 			})
 		}
 		return headers
@@ -1265,7 +1269,7 @@ export class Injector implements InjectorInterface {
 
 	// --- ELF: serialize a single program header entry (56 bytes, ELF64) ---
 
-	#writeElfProgramHeaderEntry(
+	#writeELFProgramHeaderEntry(
 		buf: Buffer,
 		pos: number,
 		entry: {
@@ -1291,32 +1295,32 @@ export class Injector implements InjectorInterface {
 
 	// --- ELF: read a note's name at a given file offset (bounds-checked) ---
 
-	#readElfNoteName(fd: number, offset: number, size: number): string | undefined {
+	#readELFNoteName(fd: number, offset: number, size: number): string | undefined {
 		if (size < 12) return undefined
-		const namesz = this.#readU32(fd, offset)
-		const descsz = this.#readU32(fd, offset + 4)
+		const namesz = readU32(fd, offset)
+		const descsz = readU32(fd, offset + 4)
 		if (namesz === 0 || namesz > 256) return undefined
-		if (12 + this.#align(namesz, 4) + this.#align(descsz, 4) > size) return undefined
+		if (12 + alignTo(namesz, 4) + alignTo(descsz, 4) > size) return undefined
 
 		const nameBuf = Buffer.alloc(namesz)
 		readSync(fd, nameBuf, 0, namesz, offset + 12)
-		return this.#stripTrailingNulls(nameBuf.toString('utf-8'))
+		return stripTrailingNulls(nameBuf.toString('utf-8'))
 	}
 
 	// --- ELF: build-time readback — confirm the note is runtime-reachable ---
 
-	#verifyElfNoteMapping(
+	#verifyELFNoteMapping(
 		fd: number,
 		phdrOffset: number,
 		phdrCount: number,
 		phdrEntrySize: number,
 	): void {
-		const headers = this.#readElfProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
+		const headers = this.#readELFProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
 		const loads = headers.filter((h) => h.type === 1)
 		const notes = headers.filter((h) => h.type === ELF_PT_NOTE)
 
 		for (const note of notes) {
-			const name = this.#readElfNoteName(fd, note.offset, note.filesz)
+			const name = this.#readELFNoteName(fd, note.offset, note.filesz)
 			if (name === undefined || !name.startsWith('NODE_SEA')) continue
 
 			const covering = loads.find(
@@ -1347,7 +1351,7 @@ export class Injector implements InjectorInterface {
 	// blob. The segment defaults to "__POSTJECT" (or custom via options)
 	// and the section is "__" + resource.
 
-	#injectMacho(): void {
+	#injectMachO(): void {
 		const exePath = this.#options.executable
 		const fileSize = statSync(exePath).size
 		let srcFd: number | undefined = openSync(exePath, 'r')
@@ -1417,7 +1421,7 @@ export class Injector implements InjectorInterface {
 			for (let i = 0; i < commands.length; i++) {
 				const cmd = commands[i]
 				if (cmd === undefined || cmd.type !== MACHO_LC_SEGMENT_64) continue
-				const segName = this.#stripTrailingNulls(
+				const segName = stripTrailingNulls(
 					buf.subarray(cmd.offset + 8, cmd.offset + 24).toString('ascii'),
 				)
 				if (segName === '__LINKEDIT') linkeditIndex = i
@@ -1445,7 +1449,7 @@ export class Injector implements InjectorInterface {
 			// arm64 (0x0100000c) requires 16K pages; every other architecture (x86_64
 			// etc.) uses 4K — 0x4000 is a safe superset alignment for either.
 			const pageSize = cputype === 0x0100000c ? 0x4000 : 0x1000
-			const shift = this.#align(blobSize, pageSize)
+			const shift = alignTo(blobSize, pageSize)
 
 			// --- Ceiling check BEFORE mutating anything: the enlarged load-command
 			// region (plus 16 bytes reserved for codesign re-adding
@@ -1495,7 +1499,7 @@ export class Injector implements InjectorInterface {
 				if (cmd === undefined || existingSegmentIndices.includes(i)) continue
 
 				if (cmd.type === MACHO_LC_SEGMENT_64) {
-					const segName = this.#stripTrailingNulls(
+					const segName = stripTrailingNulls(
 						buf.subarray(cmd.offset + 8, cmd.offset + 24).toString('ascii'),
 					)
 					if (segName === '__LINKEDIT') {
@@ -1512,7 +1516,7 @@ export class Injector implements InjectorInterface {
 					continue
 				}
 
-				this.#shiftMachoLinkeditOffsets(buf, cmd, Loff, shift)
+				this.#shiftMachOLinkeditOffsets(buf, cmd, Loff, shift)
 			}
 
 			buf.writeUInt32LE(newNcmds, 16)
@@ -1618,7 +1622,7 @@ export class Injector implements InjectorInterface {
 
 			// Build-time readback: verify the section by its section table entry,
 			// consistent with what was just written.
-			this.#verifyMachoSection(exePath, segmentName, sectionName, Loff, blobSize)
+			this.#verifyMachOSection(exePath, segmentName, sectionName, Loff, blobSize)
 		} finally {
 			// Guard each close so a throw from one does not skip the rest of the
 			// cleanup (a leaked fd or a stray temp masking the original error).
@@ -1638,7 +1642,7 @@ export class Injector implements InjectorInterface {
 	// --- Mach-O: shift every linkedit-relative offset field in a load command
 	// that points at or past `threshold` by `shift` bytes ---
 
-	#shiftMachoLinkeditOffsets(
+	#shiftMachOLinkeditOffsets(
 		buf: Buffer,
 		cmd: { type: number; offset: number },
 		threshold: number,
@@ -1685,7 +1689,7 @@ export class Injector implements InjectorInterface {
 	// matches what was written, the same shape the runtime's getsectdata
 	// lookup relies on ---
 
-	#verifyMachoSection(
+	#verifyMachOSection(
 		exePath: string,
 		segmentName: string,
 		sectionName: string,
@@ -1708,13 +1712,13 @@ export class Injector implements InjectorInterface {
 				if (cmdType === MACHO_LC_SEGMENT_64 && cmdSize >= 72) {
 					const segBuf = Buffer.alloc(cmdSize)
 					readSync(fd, segBuf, 0, cmdSize, offset)
-					const segName = this.#stripTrailingNulls(segBuf.subarray(8, 24).toString('ascii'))
+					const segName = stripTrailingNulls(segBuf.subarray(8, 24).toString('ascii'))
 					if (segName === segmentName) {
 						const nsects = segBuf.readUInt32LE(64)
 						for (let s = 0; s < nsects; s++) {
 							const sectOff = 72 + s * 80
 							if (sectOff + 80 > segBuf.length) continue
-							const secName = this.#stripTrailingNulls(
+							const secName = stripTrailingNulls(
 								segBuf.subarray(sectOff, sectOff + 16).toString('ascii'),
 							)
 							if (secName !== sectionName) continue
@@ -1737,54 +1741,9 @@ export class Injector implements InjectorInterface {
 		})
 	}
 
-	// =========================================================================
-	// Binary I/O Helpers
-	// =========================================================================
-
-	#readU16(fd: number, offset: number): number {
-		const b = Buffer.alloc(2)
-		readSync(fd, b, 0, 2, offset)
-		return b.readUInt16LE(0)
-	}
-
-	#readU32(fd: number, offset: number): number {
-		const b = Buffer.alloc(4)
-		readSync(fd, b, 0, 4, offset)
-		return b.readUInt32LE(0)
-	}
-
-	#readU64(fd: number, offset: number): bigint {
-		const b = Buffer.alloc(8)
-		readSync(fd, b, 0, 8, offset)
-		return b.readBigUInt64LE(0)
-	}
-
-	#writeU16(fd: number, offset: number, value: number): void {
-		const b = Buffer.alloc(2)
-		b.writeUInt16LE(value, 0)
-		writeSync(fd, b, 0, 2, offset)
-	}
-
-	#writeU32(fd: number, offset: number, value: number): void {
-		const b = Buffer.alloc(4)
-		b.writeUInt32LE(value >>> 0, 0)
-		writeSync(fd, b, 0, 4, offset)
-	}
-
-	#writeU64(fd: number, offset: number, value: bigint): void {
-		const b = Buffer.alloc(8)
-		b.writeBigUInt64LE(value, 0)
-		writeSync(fd, b, 0, 8, offset)
-	}
-
-	#align(value: number, alignment: number): number {
-		const remainder = value % alignment
-		return remainder === 0 ? value : value + (alignment - remainder)
-	}
-
-	// --- PE: validate section/file alignment before any #align call uses it
+	// --- PE: validate section/file alignment before any `alignTo` call uses it
 	// as a divisor — a malformed 0 value would otherwise silently corrupt
-	// output via NaN -> #writeU32 coercion. ---
+	// output through NaN -> `writeU32` coercion. ---
 
 	#ensureValidPEAlignment(sectionAlignment: number, fileAlignment: number): void {
 		if (!isPowerOfTwo(sectionAlignment) || !isPowerOfTwo(fileAlignment)) {
@@ -1801,31 +1760,5 @@ export class Injector implements InjectorInterface {
 				fileAlignment,
 			})
 		}
-	}
-
-	/** Append sourceFile to targetFile by streaming in 4 MB chunks */
-	#appendFile(targetPath: string, sourcePath: string): void {
-		const chunkSize = 4 * 1024 * 1024
-		const srcFd = openSync(sourcePath, 'r')
-		try {
-			const srcSize = statSync(sourcePath).size
-			const chunk = Buffer.alloc(Math.min(chunkSize, srcSize))
-			let offset = 0
-			while (offset < srcSize) {
-				const toRead = Math.min(chunkSize, srcSize - offset)
-				const bytesRead = readSync(srcFd, chunk, 0, toRead, offset)
-				if (bytesRead === 0) break
-				appendFileSync(targetPath, chunk.subarray(0, bytesRead))
-				offset += bytesRead
-			}
-		} finally {
-			closeSync(srcFd)
-		}
-	}
-
-	// Strip trailing null characters from a string (used for binary name fields)
-	#stripTrailingNulls(value: string): string {
-		const idx = value.indexOf(String.fromCharCode(0))
-		return idx === -1 ? value : value.slice(0, idx)
 	}
 }

@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
 	alignELFNoteSize,
+	alignTo,
+	appendFile,
 	buildELFNoteHeader,
 	compressDirectory,
 	compressFile,
@@ -16,25 +18,44 @@ import {
 	finalizeExecutable,
 	formatSize,
 	isPEExecutable,
+	isPlatformSupported,
 	isPowerOfTwo,
 	isSEAError,
 	isShellError,
 	openBrowser,
 	parsePEOffset,
+	platformConfig,
 	patchPESubsystem,
 	patchSentinelFuse,
 	readU16,
+	readU32,
+	readU64,
 	redactCommand,
 	runShell,
 	stripPESignature,
+	stripTrailingNulls,
 	syncDirectory,
 	walkDirectory,
 	writeU16,
+	writeU32,
+	writeU64,
 } from '@src/server'
 import { buildPeFixture, withTestDir } from '../../setupServer.js'
 import { captureError } from '@orkestrel/test'
 
 describe('helpers', () => {
+	describe('isPlatformSupported', () => {
+		it('agrees with platformConfig on every platform identifier', () => {
+			for (const platform of ['win32', 'darwin', 'linux', 'aix', '']) {
+				expect(isPlatformSupported(platform)).toBe(platformConfig(platform) !== undefined)
+			}
+		})
+
+		it('reports the host platform as supported when it has a configuration', () => {
+			expect(isPlatformSupported()).toBe(platformConfig() !== undefined)
+		})
+	})
+
 	describe('redactCommand', () => {
 		it('redacts values following case-insensitive password flags without mutating the input', () => {
 			const command = ['signtool', '/P', 'secret', '--password', 'other', 'target.exe']
@@ -1017,6 +1038,107 @@ describe('helpers', () => {
 			[5, 8],
 		])('aligns %i to %i bytes', (value, expected) => {
 			expect(alignELFNoteSize(value)).toBe(expected)
+		})
+	})
+
+	describe('alignTo', () => {
+		it.each([
+			[0, 4, 0],
+			[1, 4, 4],
+			[10, 4, 12],
+			[4096, 4096, 4096],
+			[4097, 4096, 8192],
+			[1, 8, 8],
+		])('aligns %i to a %i boundary as %i', (value, alignment, expected) => {
+			expect(alignTo(value, alignment)).toBe(expected)
+		})
+
+		it('backs alignELFNoteSize with the four-byte boundary', () => {
+			for (const value of [0, 1, 4, 5, 13, 4096]) {
+				expect(alignELFNoteSize(value)).toBe(alignTo(value, 4))
+			}
+		})
+	})
+
+	describe('readU32 and writeU32', () => {
+		it('round-trips a 32-bit value at an offset', async () => {
+			await withTestDir({ 'binary.bin': '\0'.repeat(16) }, (scratch) => {
+				const fd = openSync(join(scratch.path, 'binary.bin'), 'r+')
+				try {
+					writeU32(fd, 4, 0x12345678)
+
+					expect(readU32(fd, 4)).toBe(0x12345678)
+					expect(readU32(fd, 0)).toBe(0)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+
+		it('writes a negative value as its unsigned 32-bit representation', async () => {
+			await withTestDir({ 'binary.bin': '\0'.repeat(8) }, (scratch) => {
+				const fd = openSync(join(scratch.path, 'binary.bin'), 'r+')
+				try {
+					writeU32(fd, 0, -1)
+
+					expect(readU32(fd, 0)).toBe(0xffffffff)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+	})
+
+	describe('readU64 and writeU64', () => {
+		it('round-trips a 64-bit value beyond the 32-bit range', async () => {
+			await withTestDir({ 'binary.bin': '\0'.repeat(24) }, (scratch) => {
+				const fd = openSync(join(scratch.path, 'binary.bin'), 'r+')
+				try {
+					writeU64(fd, 8, 0x0102030405060708n)
+
+					expect(readU64(fd, 8)).toBe(0x0102030405060708n)
+					expect(readU64(fd, 0)).toBe(0n)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+	})
+
+	describe('appendFile', () => {
+		it('appends the whole source to the target', async () => {
+			await withTestDir({ 'target.bin': 'head-', 'source.bin': 'tail' }, (scratch) => {
+				appendFile(join(scratch.path, 'target.bin'), join(scratch.path, 'source.bin'))
+
+				expect(scratch.read('target.bin')).toBe('head-tail')
+			})
+		})
+
+		it('appends every chunk when the source is larger than one chunk', async () => {
+			await withTestDir({ 'target.bin': '', 'source.bin': 'abcdefghij' }, (scratch) => {
+				appendFile(join(scratch.path, 'target.bin'), join(scratch.path, 'source.bin'), 3)
+
+				expect(scratch.read('target.bin')).toBe('abcdefghij')
+			})
+		})
+
+		it('appends nothing for an empty source', async () => {
+			await withTestDir({ 'target.bin': 'kept', 'source.bin': '' }, (scratch) => {
+				appendFile(join(scratch.path, 'target.bin'), join(scratch.path, 'source.bin'))
+
+				expect(scratch.read('target.bin')).toBe('kept')
+			})
+		})
+	})
+
+	describe('stripTrailingNulls', () => {
+		it.each([
+			['.rsrc\0\0\0', '.rsrc'],
+			['NODE_SEA_BLOB', 'NODE_SEA_BLOB'],
+			['\0padded', ''],
+			['', ''],
+		])('truncates %j at its first NUL as %j', (value, expected) => {
+			expect(stripTrailingNulls(value)).toBe(expected)
 		})
 	})
 

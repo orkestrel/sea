@@ -19,7 +19,7 @@ export const WINDOWS_SUBSYSTEM_CONSOLE = 3
 export const BROTLI_EXTENSION = '.br'
 
 /** File extensions that should NOT be Brotli-compressed */
-export const SKIP_EXTENSIONS = new Set([
+export const SKIP_EXTENSIONS: ReadonlySet<string> = new Set([
 	'.br',
 	'.gz',
 	'.zst',

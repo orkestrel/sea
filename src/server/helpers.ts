@@ -1,5 +1,4 @@
 import type {
-	ExecutableFormat,
 	SEABlobOptions,
 	SEACompressionManifest,
 	SEACompressionOptions,
@@ -13,12 +12,14 @@ import type {
 	SEAWindowsSignOptions,
 } from './types.js'
 import {
+	appendFileSync,
 	existsSync,
 	openSync,
 	readSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	statSync,
 	writeSync,
 	closeSync,
 	writeFileSync,
@@ -33,24 +34,13 @@ import { resolve, relative, join, extname, isAbsolute, sep, dirname } from 'node
 import { detach, executeSync } from '@orkestrel/process/server'
 import {
 	BROTLI_EXTENSION,
+	DEFAULT_ENTRY_FORMAT,
 	DEFAULT_SEA_COMPRESSION_QUALITY,
 	SEA_COMPRESSION_MODE_VALUES,
 	SEA_PLATFORMS,
 	SKIP_EXTENSIONS,
 } from './constants.js'
 import { SEAError, ShellError } from './errors.js'
-
-// === Type Guards
-
-/**
- * Check if a value is a valid {@link ExecutableFormat}.
- *
- * @param value - Value to check
- * @returns True when value is `'pe'`, `'elf'`, or `'macho'`
- */
-export function isExecutableFormat(value: unknown): value is ExecutableFormat {
-	return value === 'pe' || value === 'elf' || value === 'macho'
-}
 
 // === Platform Helpers
 
@@ -160,7 +150,7 @@ export function redactCommand(command: readonly string[]): readonly string[] {
  * @throws SEAError with code `'TIMEOUT'` when the command exceeds `options.timeout`
  * @throws ShellError when the command exits with non-zero status
  */
-export function runShell(command: string[], options?: SEAShellOptions): Buffer {
+export function runShell(command: readonly string[], options?: SEAShellOptions): Buffer {
 	const [cmd, ...args] = command
 	if (cmd === undefined) {
 		throw new SEAError('STATE', 'Command array must not be empty')
@@ -297,6 +287,170 @@ export function compressDirectory(
 		assets: results,
 		total: computeSize(totalOriginal, totalCompressed),
 	}
+}
+
+// === Binary Helpers
+
+/**
+ * Rounds a value up to the next multiple of an alignment boundary.
+ *
+ * @remarks
+ * The shared alignment leaf behind every binary-format writer in this package:
+ * PE section and file alignment, ELF note and page alignment, and Mach-O page
+ * alignment all round the same way. `alignment` must be a nonzero power of two
+ * ({@link isPowerOfTwo} is the guard the PE injector applies before using a
+ * value read out of a header as a divisor).
+ *
+ * @param value - Value to align
+ * @param alignment - Alignment boundary to round up to
+ * @returns The value rounded up to the next multiple of `alignment`
+ *
+ * @example
+ * ```ts
+ * alignTo(10, 4) // 12
+ * alignTo(4096, 4096) // 4096 — already aligned
+ * ```
+ */
+export function alignTo(value: number, alignment: number): number {
+	const remainder = value % alignment
+	return remainder === 0 ? value : value + (alignment - remainder)
+}
+
+/**
+ * Reads a 32-bit unsigned little-endian integer from a file descriptor.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to read from
+ * @returns The 32-bit value
+ *
+ * @example
+ * ```ts
+ * const fd = openSync('app.exe', 'r')
+ * readU32(fd, 0x3c) // the PE header offset
+ * ```
+ */
+export function readU32(fd: number, offset: number): number {
+	const buf = Buffer.alloc(4)
+	readSync(fd, buf, 0, 4, offset)
+	return buf.readUInt32LE(0)
+}
+
+/**
+ * Reads a 64-bit unsigned little-endian integer from a file descriptor.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to read from
+ * @returns The 64-bit value, as a `bigint`
+ *
+ * @example
+ * ```ts
+ * const fd = openSync('app', 'r')
+ * readU64(fd, 32) // the ELF program header table offset
+ * ```
+ */
+export function readU64(fd: number, offset: number): bigint {
+	const buf = Buffer.alloc(8)
+	readSync(fd, buf, 0, 8, offset)
+	return buf.readBigUInt64LE(0)
+}
+
+/**
+ * Writes a 32-bit unsigned little-endian integer to a file descriptor.
+ *
+ * @remarks
+ * Coerces `value` with `>>> 0` before writing, so a negative or out-of-range
+ * number lands as its unsigned 32-bit representation rather than throwing.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to write at
+ * @param value - The 32-bit value to write
+ *
+ * @example
+ * ```ts
+ * const fd = openSync('app.exe', 'r+')
+ * writeU32(fd, 0x3c, 0x100)
+ * ```
+ */
+export function writeU32(fd: number, offset: number, value: number): void {
+	const buf = Buffer.alloc(4)
+	buf.writeUInt32LE(value >>> 0, 0)
+	writeSync(fd, buf, 0, 4, offset)
+}
+
+/**
+ * Writes a 64-bit unsigned little-endian integer to a file descriptor.
+ *
+ * @param fd - Open file descriptor
+ * @param offset - Byte offset to write at
+ * @param value - The 64-bit value to write
+ *
+ * @example
+ * ```ts
+ * const fd = openSync('app', 'r+')
+ * writeU64(fd, 32, 8192n)
+ * ```
+ */
+export function writeU64(fd: number, offset: number, value: bigint): void {
+	const buf = Buffer.alloc(8)
+	buf.writeBigUInt64LE(value, 0)
+	writeSync(fd, buf, 0, 8, offset)
+}
+
+/**
+ * Appends a source file to a target file, streaming in fixed-size chunks.
+ *
+ * @remarks
+ * Reads `source` in `chunk`-sized reads and appends each chunk to `target`, so
+ * a multi-hundred-megabyte blob is never fully buffered. A read returning zero
+ * bytes ends the copy, which is the normal end-of-file signal for a source that
+ * shrank between the size read and the copy.
+ *
+ * @param target - Path of the file to append to
+ * @param source - Path of the file to append
+ * @param chunk - Read/append chunk size in bytes. Default: 4 MB.
+ *
+ * @example
+ * ```ts
+ * appendFile('dist/sea/app', 'dist/sea/sea-prep.blob')
+ * ```
+ */
+export function appendFile(target: string, source: string, chunk = 4 * 1024 * 1024): void {
+	const fd = openSync(source, 'r')
+	try {
+		const size = statSync(source).size
+		const buffer = Buffer.alloc(Math.min(chunk, size))
+		let offset = 0
+		while (offset < size) {
+			const toRead = Math.min(chunk, size - offset)
+			const bytesRead = readSync(fd, buffer, 0, toRead, offset)
+			if (bytesRead === 0) break
+			appendFileSync(target, buffer.subarray(0, bytesRead))
+			offset += bytesRead
+		}
+	} finally {
+		closeSync(fd)
+	}
+}
+
+/**
+ * Truncates a string at its first NUL character.
+ *
+ * @remarks
+ * Binary name fields (PE section names, Mach-O segment and section names, ELF
+ * note names) are fixed-width and NUL-padded, so the decoded string carries
+ * trailing NUL characters that no comparison against a literal name matches.
+ *
+ * @param value - Decoded fixed-width name field
+ * @returns The value up to, but excluding, its first NUL character
+ *
+ * @example
+ * ```ts
+ * stripTrailingNulls('.rsrc\0\0\0') // '.rsrc'
+ * ```
+ */
+export function stripTrailingNulls(value: string): string {
+	const index = value.indexOf('\0')
+	return index === -1 ? value : value.slice(0, index)
 }
 
 // === PE Helpers
@@ -462,7 +616,7 @@ export function stripPESignature(path: string): void {
  * // ['signtool', 'sign', '/fd', 'sha256', '/sha1', 'AABBCCDDEEFF00112233445566778899AABBCCDD', 'dist/sea/app.exe']
  * ```
  */
-export function createSignCommand(sign: SEAWindowsSignOptions, target: string): string[] {
+export function createSignCommand(sign: SEAWindowsSignOptions, target: string): readonly string[] {
 	const hasFile = sign.file !== undefined
 	const hasThumbprint = sign.thumbprint !== undefined
 
@@ -769,7 +923,7 @@ export function createBlobConfig(
 	assets: Readonly<Record<string, string>> | undefined,
 	options?: SEABlobOptions,
 ): Readonly<Record<string, unknown>> {
-	const format = entry.format ?? 'cjs'
+	const format = entry.format ?? DEFAULT_ENTRY_FORMAT
 	const snapshot = options?.snapshot ?? false
 
 	if (format === 'esm' && snapshot) {
@@ -799,8 +953,7 @@ export function createBlobConfig(
  * @returns The value rounded up to the next multiple of four
  */
 export function alignELFNoteSize(value: number): number {
-	const remainder = value % 4
-	return remainder === 0 ? value : value + (4 - remainder)
+	return alignTo(value, 4)
 }
 
 /**

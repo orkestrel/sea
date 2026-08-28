@@ -1,11 +1,3 @@
-/**
- * SEA
- *
- * Build orchestrator for Node.js Single Executable Applications.
- * Compresses assets, generates the SEA blob, copies the Node binary,
- * injects the blob, and handles platform-specific signing.
- */
-
 import type {
 	SEACompressionManifest,
 	SEAEventMap,
@@ -44,7 +36,6 @@ import {
 	finalizeExecutable,
 	isCompressible,
 	isPEExecutable,
-	isPlatformSupported,
 	patchPESubsystem,
 	platformConfig,
 	runShell,
@@ -87,7 +78,7 @@ export class SEA implements SEAInterface {
 		}
 
 		const platform = platformConfig()
-		if (platform === undefined || !isPlatformSupported()) {
+		if (platform === undefined) {
 			const error = new SEAError('PLATFORM', `Unsupported platform: ${process.platform}`, {
 				platform: process.platform,
 			})
@@ -108,7 +99,7 @@ export class SEA implements SEAInterface {
 			const compression = this.#compress(root)
 
 			this.#check()
-			const blob = this.#blob(root, compression)
+			const blob = this.#buildBlob(root, compression)
 
 			this.#check()
 			const assembled = this.#assemble(root, blob)
@@ -231,7 +222,7 @@ export class SEA implements SEAInterface {
 		return manifest
 	}
 
-	#blob(root: string, compression: SEACompressionManifest | undefined): string {
+	#buildBlob(root: string, compression: SEACompressionManifest | undefined): string {
 		const entry = resolve(root, this.#options.entry.path)
 		ensureExists(entry, `Entry not found: ${this.#options.entry.path}`, 'ENTRY')
 
@@ -246,7 +237,7 @@ export class SEA implements SEAInterface {
 				...(this.#options.entry.format === undefined ? {} : { format: this.#options.entry.format }),
 			},
 			blob,
-			this.#assets(root, compression),
+			this.#resolveAssets(root, compression),
 			this.#options.blob,
 		)
 
@@ -423,7 +414,7 @@ export class SEA implements SEAInterface {
 		}
 	}
 
-	#assets(
+	#resolveAssets(
 		root: string,
 		compression: SEACompressionManifest | undefined,
 	): Readonly<Record<string, string>> {
