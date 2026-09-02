@@ -189,7 +189,7 @@ server.listen(0, () => {
 ## Status
 
 Pre-release. The public API documented in
-[`guides/src/sea.md`](https://github.com/orkestrel/sea/blob/main/guides/src/sea.md)
+[`guides/sea.md`](https://github.com/orkestrel/sea/blob/main/guides/sea.md)
 is implemented and covered by tests, but the package has not yet reached a
 stable `1.0` release.
 
@@ -202,7 +202,7 @@ Published as a single Node-only surface per the `exports` field in
 ## Guides
 
 - [`guides/README.md`](guides/README.md) — the guides index.
-- [`guides/src/sea.md`](guides/src/sea.md) — the `SEA` / `Injector` /
+- [`guides/sea.md`](guides/sea.md) — the `SEA` / `Injector` /
   `Asset` / `AssetManager` surface.
 
 ## License
