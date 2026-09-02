@@ -14,7 +14,7 @@ import { Asset } from './assets/Asset.js'
 import { AssetManager } from './assets/AssetManager.js'
 
 /**
- * Create a new SEA build orchestrator.
+ * Creates a new SEA build orchestrator.
  *
  * @param options - SEA build options
  * @returns a new `SEAInterface`
@@ -36,7 +36,7 @@ export function createSEA(options: SEAOptions): SEAInterface {
 }
 
 /**
- * Create a cross-platform binary resource injector.
+ * Creates a cross-platform binary resource injector.
  *
  * Detects the executable format (PE, ELF, Mach-O) from the file header
  * and injects the blob using pure TypeScript file I/O — no WASM, no
@@ -61,7 +61,7 @@ export function createInjector(options: InjectorOptions): InjectorInterface {
 }
 
 /**
- * Create a single named asset.
+ * Creates a single named asset.
  *
  * @param input - Asset key, content, and optional compression flag
  * @returns a new `AssetInterface`
@@ -76,7 +76,7 @@ export function createAsset(input: AssetInput): AssetInterface {
 }
 
 /**
- * Create an asset manager for SEA-embedded or disk-loaded assets.
+ * Creates an asset manager for SEA-embedded or disk-loaded assets.
  *
  * @param options - Asset manager options (root, event hooks)
  * @returns a new `AssetManagerInterface`

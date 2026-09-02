@@ -3,7 +3,7 @@ import type { EmitterErrorHandler, EmitterHooks, EmitterInterface } from '@orkes
 // === Compression
 
 /**
- * Size comparison between original and compressed data.
+ * Represents a size comparison between original and compressed data.
  */
 export interface SEACompressionSize {
 	readonly original: number
@@ -12,7 +12,7 @@ export interface SEACompressionSize {
 }
 
 /**
- * Brotli compression mode.
+ * Names a Brotli compression mode.
  *
  * @remarks
  * `generic` — general-purpose data (Brotli mode 0).
@@ -22,7 +22,7 @@ export interface SEACompressionSize {
 export type SEACompressionMode = 'generic' | 'text' | 'font'
 
 /**
- * Result of compressing a single file.
+ * Represents the result of compressing a single file.
  *
  * @remarks
  * `input`  — absolute path to the original file.
@@ -36,7 +36,7 @@ export interface SEACompressionResult {
 }
 
 /**
- * Manifest summarizing all compressed assets.
+ * Summarizes all compressed assets.
  *
  * @remarks
  * Generated after a full directory compression pass.
@@ -47,7 +47,7 @@ export interface SEACompressionManifest {
 }
 
 /**
- * Progress reported while compressing a directory.
+ * Represents the progress reported while compressing a directory.
  *
  * @remarks
  * `path`    — absolute path to the file just compressed.
@@ -61,12 +61,12 @@ export interface SEAProgress {
 }
 
 /**
- * Callback `compressDirectory` invokes after each file it compresses.
+ * Describes the callback `compressDirectory` invokes after each file it compresses.
  */
 export type SEACompressionHandler = (result: SEACompressionResult) => void
 
 /**
- * Options controlling Brotli compression of one or more directories.
+ * Controls Brotli compression of one or more directories.
  *
  * @remarks
  * `paths`   — directories (relative to `SEAOptions.root`) to compress.
@@ -82,7 +82,7 @@ export interface SEACompressionOptions {
 // === Platform
 
 /**
- * Platform-specific SEA build configuration.
+ * Represents a platform-specific SEA build configuration.
  *
  * @remarks
  * Describes the native Node binary and code signing commands.
@@ -97,7 +97,7 @@ export interface SEAPlatform {
 // === Shell
 
 /**
- * Options for executing a shell command.
+ * Configures the execution of a shell command.
  *
  * @remarks
  * `cwd` — working directory. Default: `process.cwd()`.
@@ -113,12 +113,12 @@ export interface SEAShellOptions {
 // === Injector
 
 /**
- * Executable binary format detected from file header magic bytes.
+ * Names an executable binary format detected from file header magic bytes.
  */
 export type ExecutableFormat = 'pe' | 'elf' | 'macho'
 
 /**
- * An ELF `PT_NOTE` entry's header bytes and the on-disk size of the whole entry.
+ * Holds an ELF `PT_NOTE` entry's header bytes and the on-disk size of the whole entry.
  *
  * @remarks
  * `header` — the namesz/descsz/type words followed by the NUL-terminated,
@@ -132,7 +132,7 @@ export interface ELFNoteHeader {
 }
 
 /**
- * Options for injecting a resource into an executable.
+ * Configures the injection of a resource into an executable.
  *
  * @remarks
  * `executable` — absolute path to the target executable.
@@ -152,7 +152,7 @@ export interface InjectorOptions {
 }
 
 /**
- * Mach-O specific injector options.
+ * Configures Mach-O specific injector behavior.
  *
  * @remarks
  * `segment` — Mach-O segment name. Default: `"NODE_SEA"`.
@@ -162,23 +162,23 @@ export interface InjectorMachOOptions {
 }
 
 /**
- * Cross-platform binary resource injector.
+ * Represents a cross-platform binary resource injector.
  *
  * @remarks
  * Injects arbitrary data into PE (Windows), ELF (Linux), and Mach-O (macOS)
  * executables using streaming file I/O. No WASM or external tools required.
  */
 export interface InjectorInterface {
-	/** Detected executable format of the target binary. */
+	/** Holds the detected executable format of the target binary. */
 	readonly format: ExecutableFormat
-	/** Inject the resource data into the executable. */
+	/** Injects the resource data into the executable. */
 	inject(): void
 }
 
 // === Asset
 
 /**
- * Minimal data needed to create an {@link AssetInterface}.
+ * Holds the minimal data needed to create an {@link AssetInterface}.
  *
  * @remarks
  * `key`        — the asset's lookup key (e.g. `"client.html.br"`).
@@ -193,7 +193,7 @@ export interface AssetInput {
 }
 
 /**
- * A single named asset wrapping its key, content buffer, and compression flag.
+ * Represents a single named asset wrapping its key, content buffer, and compression flag.
  */
 export interface AssetInterface {
 	readonly key: string
@@ -201,7 +201,7 @@ export interface AssetInterface {
 	readonly compressed: boolean
 }
 
-/** Events emitted by an {@link AssetManagerInterface}. */
+/** Lists the events emitted by an {@link AssetManagerInterface}. */
 export type AssetManagerEventMap = {
 	readonly register: readonly [asset: AssetInterface]
 	readonly load: readonly [keys: readonly string[]]
@@ -210,7 +210,7 @@ export type AssetManagerEventMap = {
 }
 
 /**
- * Options for creating an {@link AssetManagerInterface}.
+ * Configures the creation of an {@link AssetManagerInterface}.
  *
  * @remarks
  * `root` — project root used to resolve on-disk client assets. Default: `process.cwd()`.
@@ -222,7 +222,7 @@ export interface AssetManagerOptions {
 }
 
 /**
- * Named asset collection with SEA and disk loading.
+ * Represents a named asset collection with SEA and disk loading.
  *
  * @remarks
  * In SEA mode, embedded assets are loaded automatically at construction.
@@ -243,12 +243,12 @@ export interface AssetManagerInterface {
 // === SEA
 
 /**
- * Overall status of the seal build.
+ * Names the overall status of the seal build.
  */
 export type SEAStatus = 'idle' | 'active' | 'done' | 'error'
 
 /**
- * Machine-readable error code carried by every {@link SEAError}.
+ * Names the machine-readable error code carried by every {@link SEAError}.
  *
  * @remarks
  * `PLATFORM` — unsupported or misdetected platform.
@@ -283,7 +283,7 @@ export type SEAErrorCode =
 	| 'BROWSER'
 
 /**
- * SEA entry point module format.
+ * Names the SEA entry point module format.
  *
  * @remarks
  * `cjs` — CommonJS entry (Node default).
@@ -292,7 +292,7 @@ export type SEAErrorCode =
 export type SEAEntryFormat = 'cjs' | 'esm'
 
 /**
- * Options describing the SEA entry point.
+ * Describes the SEA entry point.
  *
  * @remarks
  * `path`   — path to the entry point to embed.
@@ -304,7 +304,7 @@ export interface SEAEntryOptions {
 }
 
 /**
- * Options controlling generated SEA blob behavior.
+ * Controls generated SEA blob behavior.
  *
  * @remarks
  * `cache`    — maps to the SEA config `useCodeCache`. Default: `true`.
@@ -315,7 +315,7 @@ export interface SEABlobOptions {
 	readonly snapshot?: boolean
 }
 
-/** Events emitted by a {@link SEAInterface}. */
+/** Lists the events emitted by a {@link SEAInterface}. */
 export type SEAEventMap = {
 	readonly compress: readonly [compression: SEACompressionManifest | undefined]
 	readonly progress: readonly [progress: SEAProgress]
@@ -326,7 +326,7 @@ export type SEAEventMap = {
 }
 
 /**
- * Options for creating a SEA build.
+ * Configures the creation of a SEA build.
  *
  * @remarks
  * `name`        — output executable name (no extension).
@@ -358,7 +358,7 @@ export interface SEAOptions {
 }
 
 /**
- * Windows-specific SEA build options.
+ * Configures Windows-specific SEA build behavior.
  *
  * @remarks
  * `terminal` — whether the built executable keeps a console window (PE
@@ -381,7 +381,7 @@ export interface SEAWindowsOptions {
 }
 
 /**
- * Windows Authenticode signing options, passed through to `signtool`.
+ * Describes the Windows Authenticode signing options passed through to `signtool`.
  *
  * @remarks
  * `file`       — path to a `.pfx`/`.p12` certificate file (`signtool /f`).
@@ -407,7 +407,7 @@ export interface SEAWindowsSignOptions {
 }
 
 /**
- * Result of a successful seal build.
+ * Represents the result of a successful seal build.
  *
  * @remarks
  * `executable`  — absolute path to the output binary.
@@ -432,7 +432,7 @@ export interface SEAResult {
 }
 
 /**
- * SEA build orchestrator.
+ * Represents a SEA build orchestrator.
  *
  * @remarks
  * Compresses assets, generates the SEA blob, copies the Node binary,

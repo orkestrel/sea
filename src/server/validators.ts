@@ -3,10 +3,10 @@ import type { ExecutableFormat } from './types.js'
 // === Type Guards
 
 /**
- * Check if a value is a valid {@link ExecutableFormat}.
+ * Checks if a value is a valid {@link ExecutableFormat}.
  *
  * @param value - Value to check
- * @returns True when value is `'pe'`, `'elf'`, or `'macho'`
+ * @returns True if value is `'pe'`, `'elf'`, or `'macho'`; false otherwise
  *
  * @example
  * ```ts

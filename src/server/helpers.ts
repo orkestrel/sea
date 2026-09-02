@@ -46,7 +46,7 @@ import { SEAError, ShellError } from './errors.js'
 // === Platform Helpers
 
 /**
- * Get the platform configuration for the current OS.
+ * Gets the platform configuration for the current OS.
  *
  * @param platform - Platform identifier. Default: `process.platform`.
  * @returns Platform configuration, or undefined if unsupported
@@ -56,10 +56,10 @@ export function platformConfig(platform?: string): SEAPlatform | undefined {
 }
 
 /**
- * Check if the current or specified platform is supported for SEA builds.
+ * Checks if the current or specified platform is supported for SEA builds.
  *
  * @param platform - Platform identifier to check
- * @returns True when the platform has a known configuration
+ * @returns True if the platform has a known configuration; false otherwise
  */
 export function isPlatformSupported(platform?: string): boolean {
 	return (platform ?? process.platform) in SEA_PLATFORMS
@@ -68,7 +68,7 @@ export function isPlatformSupported(platform?: string): boolean {
 // === Filesystem Helpers
 
 /**
- * Assert that a path exists, throwing a coded {@link SEAError} if not.
+ * Asserts that a path exists, throwing a coded {@link SEAError} if not.
  *
  * @param path - Absolute or relative path to check
  * @param message - Error message when path is missing
@@ -81,10 +81,10 @@ export function ensureExists(path: string, message: string, code?: SEAErrorCode)
 }
 
 /**
- * Check if a file should be Brotli-compressed based on its extension.
+ * Checks if a file should be Brotli-compressed based on its extension.
  *
  * @param path - Path to the file
- * @returns True when the file type benefits from compression
+ * @returns True if the file type benefits from compression; false otherwise
  */
 export function isCompressible(path: string): boolean {
 	const ext = extname(path).toLowerCase()
@@ -92,7 +92,7 @@ export function isCompressible(path: string): boolean {
 }
 
 /**
- * Recursively walk a directory and return all file paths.
+ * Walks a directory recursively and returns all file paths.
  *
  * @param directory - Directory to walk
  * @param base - Base directory for relative path calculation
@@ -124,7 +124,7 @@ export function walkDirectory(directory: string, base?: string): readonly string
 // === Shell Helpers
 
 /**
- * Redact password arguments from a shell command.
+ * Redacts password arguments from a shell command.
  *
  * @param command - Command arguments to redact
  * @returns A copy with values following password flags replaced by a marker
@@ -195,7 +195,7 @@ export function executeShell(command: readonly string[], options?: SEAShellOptio
 // === Compression Helpers
 
 /**
- * Compute a size comparison between original and compressed byte counts.
+ * Computes a size comparison between original and compressed byte counts.
  *
  * @param original - Original byte count
  * @param compressed - Compressed byte count
@@ -207,7 +207,7 @@ export function computeSize(original: number, compressed: number): SEACompressio
 }
 
 /**
- * Brotli-compress a single file, writing the output alongside it.
+ * Brotli-compresses a single file, writing the output alongside it.
  *
  * @param input - Absolute path to the source file
  * @param output - Absolute path for the compressed output
@@ -255,7 +255,7 @@ export function compressFile(
 }
 
 /**
- * Compress all compressible files in a directory tree.
+ * Compresses all compressible files in a directory tree.
  *
  * @param directory - Absolute path to the directory
  * @param options - Compression options
@@ -457,10 +457,10 @@ export function stripTrailingNulls(value: string): string {
 // === PE Helpers
 
 /**
- * Check whether a number is a nonzero power of two.
+ * Checks whether a number is a nonzero power of two.
  *
  * @param value - Number to check
- * @returns True when the value is a positive power of two
+ * @returns True if the value is a positive power of two; false otherwise
  */
 export function isPowerOfTwo(value: number): boolean {
 	return value > 0 && (value & (value - 1)) === 0
@@ -479,7 +479,7 @@ export function readPEOffset(fd: number): number {
 }
 
 /**
- * Read a 16-bit unsigned integer from a file descriptor.
+ * Reads a 16-bit unsigned integer from a file descriptor.
  *
  * @param fd - Open file descriptor
  * @param offset - Byte offset to read from
@@ -492,7 +492,7 @@ export function readU16(fd: number, offset: number): number {
 }
 
 /**
- * Write a 16-bit unsigned integer to a file descriptor.
+ * Writes a 16-bit unsigned integer to a file descriptor.
  *
  * @param fd - Open file descriptor
  * @param offset - Byte offset to write at
@@ -505,10 +505,10 @@ export function writeU16(fd: number, offset: number, value: number): void {
 }
 
 /**
- * Check if a file is a Windows PE executable.
+ * Checks if a file is a Windows PE executable.
  *
  * @param path - Path to the file
- * @returns True when the file has a valid PE signature
+ * @returns True if the file has a valid PE signature; false otherwise
  */
 export function isPEExecutable(path: string): boolean {
 	let fd: number | undefined
@@ -526,7 +526,7 @@ export function isPEExecutable(path: string): boolean {
 }
 
 /**
- * Patch the PE subsystem field in a Windows executable.
+ * Patches the PE subsystem field in a Windows executable.
  *
  * @param path - Path to the executable
  * @param subsystem - Numeric subsystem value (2 = GUI, 3 = Console)
@@ -543,7 +543,7 @@ export function patchPESubsystem(path: string, subsystem: number): void {
 }
 
 /**
- * Remove the Authenticode signature from a PE executable by zeroing
+ * Removes the Authenticode signature from a PE executable by zeroing
  * the security directory entry in the optional header.
  *
  * @remarks
@@ -591,7 +591,7 @@ export function stripPESignature(path: string): void {
 // === Signing Helpers
 
 /**
- * Build the `signtool sign` argv for signing a Windows executable.
+ * Builds the `signtool sign` argv for signing a Windows executable.
  *
  * @remarks
  * Requires EXACTLY ONE certificate source — `sign.file` (a `.pfx`/`.p12`
@@ -673,7 +673,7 @@ export function createSignCommand(sign: SEAWindowsSignOptions, target: string): 
 // === Formatting Helpers
 
 /**
- * Format a byte count as a human-readable string.
+ * Formats a byte count as a human-readable string.
  *
  * @param bytes - Byte count
  * @returns Formatted string (e.g. `"1.23 MB"`, `"456 KB"`)
@@ -685,7 +685,7 @@ export function formatSize(bytes: number): string {
 }
 
 /**
- * Assert that an asset key is safe to use as a relative filesystem/archive key.
+ * Asserts that an asset key is safe to use as a relative filesystem/archive key.
  *
  * @remarks
  * Rejects an empty key, an absolute path, a key containing a backslash, a
@@ -721,7 +721,7 @@ export function ensureSafeKey(key: string): void {
 }
 
 /**
- * Assert that `path` (resolved against `base`) real-path-resolves to a
+ * Asserts that `path` (resolved against `base`) real-path-resolves to a
  * location inside `base`, defeating a symlink escape.
  *
  * @remarks
@@ -767,7 +767,7 @@ export function ensureContained(base: string, path: string): string {
 }
 
 /**
- * Assert that `name` is a single safe path segment suitable as an output
+ * Asserts that `name` is a single safe path segment suitable as an output
  * executable base name.
  *
  * @remarks
@@ -803,7 +803,7 @@ export function ensureSafeName(name: string): void {
 }
 
 /**
- * Fsync a directory to durably persist a prior file rename/create within it.
+ * Fsyncs a directory to durably persist a prior file rename/create within it.
  *
  * @remarks
  * A `rename`/`create` is only durable once its CONTAINING directory entry is
@@ -859,7 +859,7 @@ export function syncDirectory(path: string): void {
 }
 
 /**
- * Finalize a built executable by durably flushing it to disk and atomically
+ * Finalizes a built executable by durably flushing it to disk and atomically
  * moving it into place.
  *
  * @remarks
@@ -895,7 +895,7 @@ export function finalizeExecutable(source: string, target: string): void {
 }
 
 /**
- * Build the Node.js `--experimental-sea-config` JSON object for a SEA blob.
+ * Builds the Node.js `--experimental-sea-config` JSON object for a SEA blob.
  *
  * @remarks
  * A pure leaf extracted from the SEA build orchestrator. The `mainFormat`
@@ -948,7 +948,7 @@ export function createBlobConfig(
 // === ELF Helpers
 
 /**
- * Align an ELF note component size to its four-byte boundary.
+ * Aligns an ELF note component size to its four-byte boundary.
  *
  * @param value - Component size to align
  * @returns The value rounded up to the next multiple of four
@@ -995,7 +995,7 @@ export function buildELFNoteHeader(resource: string, blobSize: number): ELFNoteH
 }
 
 /**
- * Copy a byte range from one open file descriptor to another, streaming in
+ * Copies a byte range from one open file descriptor to another, streaming in
  * fixed-size chunks instead of buffering the whole range in memory.
  *
  * @remarks
@@ -1057,7 +1057,7 @@ export function copyRange(
 // === SEA Helpers
 
 /**
- * Patch the sentinel fuse in a binary from `:0` to `:1`.
+ * Patches the sentinel fuse in a binary from `:0` to `:1`.
  *
  * Searches the file in 64 MB chunks with overlap to handle any file size.
  * The fuse signals to the Node.js runtime that a SEA blob is present.
@@ -1124,7 +1124,7 @@ export function patchSentinelFuse(executable: string, fuse: string): void {
 // === Runtime Helpers
 
 /**
- * Launch the system default browser at an http(s) URL.
+ * Launches the system default browser at an http(s) URL.
  *
  * @remarks
  * A best-effort launch for bundled local-UI apps: dispatches by

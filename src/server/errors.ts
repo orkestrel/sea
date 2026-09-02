@@ -8,7 +8,7 @@ import type { SEAErrorCode } from './types.js'
 // the process output rather than parsing the thrown message.
 
 /**
- * The coded base error for every failure raised by the seal build.
+ * Represents the coded base error for every failure raised by the seal build.
  *
  * @remarks
  * Carries a machine-readable {@link SEAErrorCode} and optional `context`
@@ -40,10 +40,10 @@ export class SEAError extends Error {
 }
 
 /**
- * Whether a value is a {@link SEAError}.
+ * Checks whether a value is a {@link SEAError}.
  *
  * @param value - The value to test
- * @returns `true` when `value` is a `SEAError`
+ * @returns True if `value` is a `SEAError`; false otherwise
  *
  * @example
  * ```ts
@@ -57,7 +57,7 @@ export function isSEAError(value: unknown): value is SEAError {
 }
 
 /**
- * An error thrown when a shell command executed through `executeShell` exits non-zero.
+ * Represents an error thrown when a shell command executed through `executeShell` exits non-zero.
  *
  * @remarks
  * Carries the captured `stdout` and `stderr` buffers from the failed process.
@@ -88,10 +88,10 @@ export class ShellError extends SEAError {
 }
 
 /**
- * Whether a value is a {@link ShellError}.
+ * Checks whether a value is a {@link ShellError}.
  *
  * @param value - The value to test
- * @returns `true` when `value` is a `ShellError`
+ * @returns True if `value` is a `ShellError`; false otherwise
  *
  * @example
  * ```ts
