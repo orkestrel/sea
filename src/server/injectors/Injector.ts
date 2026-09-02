@@ -1125,11 +1125,8 @@ export class Injector implements InjectorInterface {
 		const regionVaddr = alignTo(maxVaddrEnd, PAGE)
 
 		const blobSize = statSync(this.#options.blob).size
-		const { header: noteHeader, entryTotal: noteEntryTotal } = buildELFNoteHeader(
-			resource,
-			blobSize,
-		)
-		const noteAreaSize = alignTo(noteEntryTotal, 8)
+		const { header: noteHeader, total: noteTotal } = buildELFNoteHeader(resource, blobSize)
+		const noteAreaSize = alignTo(noteTotal, 8)
 
 		const newEntryCount = headers.length + 2
 		const phtSize = newEntryCount * phdrEntrySize
@@ -1155,8 +1152,8 @@ export class Injector implements InjectorInterface {
 			offset: regionStart,
 			vaddr: regionVaddr,
 			paddr: regionVaddr,
-			filesz: noteEntryTotal,
-			memsz: noteEntryTotal,
+			filesz: noteTotal,
+			memsz: noteTotal,
 			align: 4,
 		}
 
@@ -1202,7 +1199,7 @@ export class Injector implements InjectorInterface {
 			appendFileSync(exePath, Buffer.alloc(descPadding))
 		}
 
-		const trailingPad = noteAreaSize - noteEntryTotal
+		const trailingPad = noteAreaSize - noteTotal
 		if (trailingPad > 0) {
 			appendFileSync(exePath, Buffer.alloc(trailingPad))
 		}

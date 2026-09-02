@@ -3,7 +3,7 @@ import type { SEAErrorCode } from './types.js'
 // Error surface for the seal build. `SEAError` is the coded base every
 // domain failure throws through, so a caller can branch on `code` rather
 // than parsing a message string. `ShellError` specializes it for the shell
-// boundary — `runShell` maps a failed `executeSync` invocation to a
+// boundary — `executeShell` maps a failed `executeSync` invocation to a
 // `ShellError` carrying the captured stdout/stderr, so a caller can inspect
 // the process output rather than parsing the thrown message.
 
@@ -57,7 +57,7 @@ export function isSEAError(value: unknown): value is SEAError {
 }
 
 /**
- * An error thrown when a shell command run via `runShell` exits non-zero.
+ * An error thrown when a shell command executed through `executeShell` exits non-zero.
  *
  * @remarks
  * Carries the captured `stdout` and `stderr` buffers from the failed process.
@@ -67,7 +67,7 @@ export function isSEAError(value: unknown): value is SEAError {
  * @example
  * ```ts
  * try {
- *     runShell(['codesign', '--sign', '-', path])
+ *     executeShell(['codesign', '--sign', '-', path])
  * } catch (error) {
  *     if (isShellError(error)) {
  *         console.error(error.stderr.toString())

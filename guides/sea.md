@@ -101,13 +101,13 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `ensureExists`        | function | Assert that a path exists, throwing with a descriptive message if not.          |
 | `isCompressible`      | function | Check if a file should be Brotli-compressed based on its extension.             |
 | `walkDirectory`       | function | Recursively walk a directory and return all file paths.                         |
-| `runShell`            | function | Run a command synchronously and return stdout; throws `ShellError`.             |
+| `executeShell`        | function | Execute a command synchronously and return stdout; throws `ShellError`.         |
 | `redactCommand`       | function | Redact a shell command's arguments for safe inclusion in error messages.        |
 | `computeSize`         | function | Compute a size comparison between original and compressed byte counts.          |
 | `compressFile`        | function | Brotli-compress a single file, writing the output alongside it.                 |
 | `compressDirectory`   | function | Compress all compressible files in a directory tree.                            |
 | `alignTo`             | function | Round a value up to the next multiple of an alignment boundary.                 |
-| `parsePEOffset`       | function | Parse the PE header offset from a Windows executable.                           |
+| `readPEOffset`        | function | Read the PE header offset from a Windows executable.                            |
 | `readU16`             | function | Read a 16-bit unsigned integer from a file descriptor.                          |
 | `readU32`             | function | Read a 32-bit unsigned little-endian integer from a file descriptor.            |
 | `readU64`             | function | Read a 64-bit unsigned little-endian integer from a file descriptor.            |
@@ -135,7 +135,7 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `openBrowser`         | function | Launch the system default browser at an http(s) URL.                            |
 | `SEAError`            | class    | The coded base error for every failure raised by the seal build.                |
 | `isSEAError`          | function | Whether a value is a `SEAError`.                                                |
-| `ShellError`          | class    | Error thrown when a shell command run via `runShell` exits non-zero.            |
+| `ShellError`          | class    | Error `executeShell` throws when a command exits non-zero.                      |
 | `isShellError`        | function | Whether a value is a `ShellError`.                                              |
 
 ### Types
@@ -147,11 +147,12 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `SEACompressionResult`   | interface | Result of compressing a single file.                                         |
 | `SEACompressionManifest` | interface | Manifest summarizing all compressed assets.                                  |
 | `SEAProgress`            | interface | Progress reported while compressing a directory (`path`/`current`/`total`).  |
-| `SEAProgressHandler`     | type      | Callback invoked by the framework after each file is compressed.             |
+| `SEACompressionHandler`  | type      | Callback `compressDirectory` invokes after each file it compresses.          |
 | `SEACompressionOptions`  | interface | Options controlling Brotli compression of one or more directories.           |
 | `SEAPlatform`            | interface | Platform-specific SEA build configuration.                                   |
-| `SEAShellOptions`        | interface | Options for running a shell command.                                         |
+| `SEAShellOptions`        | interface | Options for executing a shell command.                                       |
 | `ExecutableFormat`       | type      | Executable binary format detected from file header magic bytes.              |
+| `ELFNoteHeader`          | interface | An ELF `PT_NOTE` entry's header bytes and the entry's on-disk size.          |
 | `InjectorOptions`        | interface | Options for injecting a resource into an executable.                         |
 | `InjectorMachOOptions`   | interface | Mach-O specific injector options.                                            |
 | `InjectorInterface`      | interface | Cross-platform binary resource injector contract.                            |
@@ -249,7 +250,7 @@ manager.destroy()
 
 ```ts
 import {
-	runShell,
+	executeShell,
 	redactCommand,
 	isShellError,
 	platformConfig,
@@ -262,7 +263,7 @@ import {
 	compressDirectory,
 	formatSize,
 	isExecutableFormat,
-	parsePEOffset,
+	readPEOffset,
 	readU16,
 	readU32,
 	readU64,
@@ -286,7 +287,7 @@ import {
 } from '@orkestrel/sea'
 
 try {
-	runShell(['node', '--version'])
+	executeShell(['node', '--version'])
 } catch (error) {
 	if (isShellError(error)) {
 		error.stdout // captured stdout Buffer
@@ -310,7 +311,7 @@ formatSize(size.compressed) // '400 B'
 isExecutableFormat('elf') // true
 
 const fd = 0 // an open file descriptor from openSync in real usage
-// parsePEOffset(fd) / readU16(fd, offset) / writeU16(fd, offset, value)
+// readPEOffset(fd) / readU16(fd, offset) / writeU16(fd, offset, value)
 // readU32(fd, offset) / readU64(fd, offset) — 32- and 64-bit little-endian reads
 // writeU32(fd, offset, value) / writeU64(fd, offset, value) — the matching writes
 // isPEExecutable(path) / patchPESubsystem(path, subsystem) / stripPESignature(path)

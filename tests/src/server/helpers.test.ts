@@ -15,6 +15,7 @@ import {
 	ensureContained,
 	ensureSafeKey,
 	ensureSafeName,
+	executeShell,
 	finalizeExecutable,
 	formatSize,
 	isPEExecutable,
@@ -23,15 +24,14 @@ import {
 	isSEAError,
 	isShellError,
 	openBrowser,
-	parsePEOffset,
 	platformConfig,
 	patchPESubsystem,
 	patchSentinelFuse,
+	readPEOffset,
 	readU16,
 	readU32,
 	readU64,
 	redactCommand,
-	runShell,
 	stripPESignature,
 	stripTrailingNulls,
 	syncDirectory,
@@ -72,16 +72,16 @@ describe('helpers', () => {
 		})
 	})
 
-	describe('runShell', () => {
+	describe('executeShell', () => {
 		it('returns stdout on success', () => {
-			const stdout = runShell([process.execPath, '-e', "process.stdout.write('ok')"])
+			const stdout = executeShell([process.execPath, '-e', "process.stdout.write('ok')"])
 
 			expect(stdout.toString('utf-8')).toBe('ok')
 		})
 
 		it('throws SEAError code STATE for an empty command array', () => {
 			const error = captureError(() => {
-				return runShell([])
+				return executeShell([])
 			})
 
 			expect(isSEAError(error) && error.code === 'STATE').toBe(true)
@@ -89,7 +89,7 @@ describe('helpers', () => {
 
 		it('enforces a timeout', () => {
 			const error = captureError(() => {
-				return runShell([process.execPath, '-e', 'setInterval(()=>{},1000)'], { timeout: 50 })
+				return executeShell([process.execPath, '-e', 'setInterval(()=>{},1000)'], { timeout: 50 })
 			})
 
 			expect(isSEAError(error) && error.code === 'TIMEOUT').toBe(true)
@@ -100,7 +100,7 @@ describe('helpers', () => {
 			controller.abort()
 
 			const error = captureError(() => {
-				return runShell(['this-command-does-not-exist'], { signal: controller.signal })
+				return executeShell(['this-command-does-not-exist'], { signal: controller.signal })
 			})
 
 			expect(isSEAError(error) && error.code === 'ABORT').toBe(true)
@@ -108,7 +108,7 @@ describe('helpers', () => {
 
 		it('maps a non-zero exit to a ShellError', () => {
 			const error = captureError(() => {
-				return runShell([process.execPath, '-e', 'process.exit(3)'])
+				return executeShell([process.execPath, '-e', 'process.exit(3)'])
 			})
 
 			expect(isShellError(error) && error.code === 'SHELL').toBe(true)
@@ -117,7 +117,7 @@ describe('helpers', () => {
 
 		it('redacts a /p secret from a ShellError message on a non-zero exit', () => {
 			const error = captureError(() => {
-				return runShell([process.execPath, '-e', 'process.exit(3)', '/p', 'SECRETVALUE'])
+				return executeShell([process.execPath, '-e', 'process.exit(3)', '/p', 'SECRETVALUE'])
 			})
 
 			expect(isShellError(error) && error.message.includes('SECRETVALUE')).toBe(false)
@@ -129,7 +129,7 @@ describe('helpers', () => {
 			controller.abort()
 
 			const error = captureError(() => {
-				return runShell(['signtool', '/p', 'SECRETVALUE'], { signal: controller.signal })
+				return executeShell(['signtool', '/p', 'SECRETVALUE'], { signal: controller.signal })
 			})
 
 			const context = isSEAError(error) ? error.context : undefined
@@ -688,8 +688,8 @@ describe('helpers', () => {
 		})
 	})
 
-	describe('parsePEOffset / readU16 / writeU16 / isPEExecutable', () => {
-		it('parses the PE header offset from a valid PE fixture', async () => {
+	describe('readPEOffset / readU16 / writeU16 / isPEExecutable', () => {
+		it('reads the PE header offset from a valid PE fixture', async () => {
 			await withTestDir({}, (scratch) => {
 				const path = join(scratch.path, 'app.exe')
 				const buf = buildPeFixture()
@@ -697,7 +697,7 @@ describe('helpers', () => {
 
 				const fd = openSync(path, 'r')
 				try {
-					expect(parsePEOffset(fd)).toBe(buf.readUInt32LE(0x3c))
+					expect(readPEOffset(fd)).toBe(buf.readUInt32LE(0x3c))
 				} finally {
 					closeSync(fd)
 				}
@@ -711,7 +711,7 @@ describe('helpers', () => {
 
 				const fd = openSync(path, 'r')
 				try {
-					expect(parsePEOffset(fd)).toBe(0)
+					expect(readPEOffset(fd)).toBe(0)
 				} finally {
 					closeSync(fd)
 				}
@@ -1009,7 +1009,7 @@ describe('helpers', () => {
 
 	describe('buildELFNoteHeader', () => {
 		it('encodes namesz/descsz/type and the 4-padded name', () => {
-			const { header, entryTotal } = buildELFNoteHeader('NODE_SEA_BLOB', 4096)
+			const { header, total } = buildELFNoteHeader('NODE_SEA_BLOB', 4096)
 
 			expect(header.readUInt32LE(0)).toBe('NODE_SEA_BLOB'.length + 1) // namesz includes NUL
 			expect(header.readUInt32LE(4)).toBe(4096) // descsz
@@ -1017,16 +1017,16 @@ describe('helpers', () => {
 			expect(header.toString('utf-8', 12, 12 + 'NODE_SEA_BLOB'.length + 1)).toBe('NODE_SEA_BLOB\0')
 			// name region is 4-byte-padded: namesz=14 aligns up to 16
 			expect(header.length).toBe(12 + 16)
-			expect(entryTotal).toBe(header.length + 4096)
+			expect(total).toBe(header.length + 4096)
 		})
 
-		it('4-byte-pads the blob size in entryTotal when it is not aligned', () => {
-			const { header, entryTotal } = buildELFNoteHeader('X', 10)
+		it('4-byte-pads the blob size in total when it is not aligned', () => {
+			const { header, total } = buildELFNoteHeader('X', 10)
 
 			// namesz = 2 ('X\0'), aligned to 4
 			expect(header.length).toBe(12 + 4)
 			// blobSize 10 aligns up to 12
-			expect(entryTotal).toBe(header.length + 12)
+			expect(total).toBe(header.length + 12)
 		})
 	})
 

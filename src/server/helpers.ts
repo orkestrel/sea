@@ -1,5 +1,7 @@
 import type {
+	ELFNoteHeader,
 	SEABlobOptions,
+	SEACompressionHandler,
 	SEACompressionManifest,
 	SEACompressionOptions,
 	SEACompressionResult,
@@ -7,7 +9,6 @@ import type {
 	SEAEntryOptions,
 	SEAErrorCode,
 	SEAPlatform,
-	SEAProgressHandler,
 	SEAShellOptions,
 	SEAWindowsSignOptions,
 } from './types.js'
@@ -140,7 +141,7 @@ export function redactCommand(command: readonly string[]): readonly string[] {
 }
 
 /**
- * Run a command synchronously and return stdout.
+ * Executes a command synchronously and returns stdout.
  *
  * @param command - Command to execute (first element is the binary)
  * @param options - Shell options (cwd, env, timeout, signal)
@@ -150,7 +151,7 @@ export function redactCommand(command: readonly string[]): readonly string[] {
  * @throws SEAError with code `'TIMEOUT'` when the command exceeds `options.timeout`
  * @throws ShellError when the command exits with non-zero status
  */
-export function runShell(command: readonly string[], options?: SEAShellOptions): Buffer {
+export function executeShell(command: readonly string[], options?: SEAShellOptions): Buffer {
 	const [cmd, ...args] = command
 	if (cmd === undefined) {
 		throw new SEAError('STATE', 'Command array must not be empty')
@@ -264,7 +265,7 @@ export function compressFile(
 export function compressDirectory(
 	directory: string,
 	options?: SEACompressionOptions,
-	progress?: SEAProgressHandler,
+	progress?: SEACompressionHandler,
 ): SEACompressionManifest {
 	const files = walkDirectory(directory)
 	const results: SEACompressionResult[] = []
@@ -466,12 +467,12 @@ export function isPowerOfTwo(value: number): boolean {
 }
 
 /**
- * Parse the PE header offset from a Windows executable.
+ * Reads the PE header offset from a Windows executable.
  *
  * @param fd - Open file descriptor
  * @returns The offset to the PE signature
  */
-export function parsePEOffset(fd: number): number {
+export function readPEOffset(fd: number): number {
 	const buf = Buffer.alloc(4)
 	readSync(fd, buf, 0, 4, 0x3c)
 	return buf.readUInt32LE(0)
@@ -513,7 +514,7 @@ export function isPEExecutable(path: string): boolean {
 	let fd: number | undefined
 	try {
 		fd = openSync(path, 'r')
-		const peOffset = parsePEOffset(fd)
+		const peOffset = readPEOffset(fd)
 		const sig = Buffer.alloc(4)
 		readSync(fd, sig, 0, 4, peOffset)
 		return sig.toString('ascii') === 'PE\0\0'
@@ -533,7 +534,7 @@ export function isPEExecutable(path: string): boolean {
 export function patchPESubsystem(path: string, subsystem: number): void {
 	const fd = openSync(path, 'r+')
 	try {
-		const peOffset = parsePEOffset(fd)
+		const peOffset = readPEOffset(fd)
 		// Subsystem field is at PE offset + 0x5C (in the Optional Header)
 		writeU16(fd, peOffset + 0x5c, subsystem)
 	} finally {
@@ -559,7 +560,7 @@ export function patchPESubsystem(path: string, subsystem: number): void {
 export function stripPESignature(path: string): void {
 	const fd = openSync(path, 'r+')
 	try {
-		const peOffset = parsePEOffset(fd)
+		const peOffset = readPEOffset(fd)
 		// COFF header: 24 bytes from PE signature
 		// Optional header magic at peOffset + 24
 		const magic = readU16(fd, peOffset + 24)
@@ -597,14 +598,14 @@ export function stripPESignature(path: string): void {
  * file, paired with `sign.password` when present) XOR `sign.thumbprint` (a
  * certificate already installed in the Windows store). When `sign.timestamp`
  * is set it is parsed with the `URL` constructor and must be an `http:` or
- * `https:` URL. The returned argv is passed directly to `runShell` — never
+ * `https:` URL. The returned argv is passed directly to `executeShell` — never
  * through a shell — so nothing in `sign` can be interpreted as a flag or
  * injected into a command line. `sign.password` is NEVER included in a
  * thrown error's message or `context`.
  *
  * @param sign - Windows signing options
  * @param target - Absolute path to the executable to sign
- * @returns The `signtool` argv, ready for `runShell`
+ * @returns The `signtool` argv, ready for `executeShell`
  * @throws SEAError with code `'SIGN'` when neither `file` nor `thumbprint` is set
  * @throws SEAError with code `'SIGN'` when both `file` and `thumbprint` are set
  * @throws SEAError with code `'SIGN'` when `timestamp` is not a parseable http(s) URL
@@ -957,7 +958,7 @@ export function alignELFNoteSize(value: number): number {
 }
 
 /**
- * Build an ELF `PT_NOTE` entry's header bytes (namesz/descsz/type + padded
+ * Builds an ELF `PT_NOTE` entry's header bytes (namesz/descsz/type + padded
  * name) for the SEA blob note, without the blob body itself.
  *
  * @remarks
@@ -976,13 +977,10 @@ export function alignELFNoteSize(value: number): number {
  *
  * @example
  * ```ts
- * const { header, entryTotal } = buildELFNoteHeader('NODE_SEA_BLOB', 4096)
+ * const { header, total } = buildELFNoteHeader('NODE_SEA_BLOB', 4096)
  * ```
  */
-export function buildELFNoteHeader(
-	resource: string,
-	blobSize: number,
-): { readonly header: Buffer; readonly entryTotal: number } {
+export function buildELFNoteHeader(resource: string, blobSize: number): ELFNoteHeader {
 	const nameBytes = Buffer.from(`${resource}\0`, 'utf-8')
 	const alignedNameSize = alignELFNoteSize(nameBytes.length)
 
@@ -993,7 +991,7 @@ export function buildELFNoteHeader(
 	nameBytes.copy(header, 12)
 
 	const alignedDescSize = alignELFNoteSize(blobSize)
-	return { header, entryTotal: header.length + alignedDescSize }
+	return { header, total: header.length + alignedDescSize }
 }
 
 /**

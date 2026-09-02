@@ -61,9 +61,9 @@ export interface SEAProgress {
 }
 
 /**
- * Callback invoked by the framework after each file is compressed.
+ * Callback `compressDirectory` invokes after each file it compresses.
  */
-export type SEAProgressHandler = (result: SEACompressionResult) => void
+export type SEACompressionHandler = (result: SEACompressionResult) => void
 
 /**
  * Options controlling Brotli compression of one or more directories.
@@ -97,7 +97,7 @@ export interface SEAPlatform {
 // === Shell
 
 /**
- * Options for running a shell command.
+ * Options for executing a shell command.
  *
  * @remarks
  * `cwd` — working directory. Default: `process.cwd()`.
@@ -116,6 +116,20 @@ export interface SEAShellOptions {
  * Executable binary format detected from file header magic bytes.
  */
 export type ExecutableFormat = 'pe' | 'elf' | 'macho'
+
+/**
+ * An ELF `PT_NOTE` entry's header bytes and the on-disk size of the whole entry.
+ *
+ * @remarks
+ * `header` — the namesz/descsz/type words followed by the NUL-terminated,
+ * four-byte-padded note name.
+ * `total`  — bytes the complete entry occupies on disk: `header` plus the
+ * four-byte-padded blob written after it.
+ */
+export interface ELFNoteHeader {
+	readonly header: Buffer
+	readonly total: number
+}
 
 /**
  * Options for injecting a resource into an executable.

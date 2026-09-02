@@ -33,12 +33,12 @@ import {
 	ensureExists,
 	ensureSafeKey,
 	ensureSafeName,
+	executeShell,
 	finalizeExecutable,
 	isCompressible,
 	isPEExecutable,
 	patchPESubsystem,
 	platformConfig,
-	runShell,
 	stripPESignature,
 	walkDirectory,
 } from '../helpers.js'
@@ -242,7 +242,7 @@ export class SEA implements SEAInterface {
 		)
 
 		writeFileSync(configPath, JSON.stringify(config, null, 2))
-		runShell([process.execPath, '--experimental-sea-config', configPath], {
+		executeShell([process.execPath, '--experimental-sea-config', configPath], {
 			cwd: output,
 			...(this.#options.signal === undefined ? {} : { signal: this.#options.signal }),
 			...(this.#options.timeout === undefined ? {} : { timeout: this.#options.timeout }),
@@ -294,7 +294,7 @@ export class SEA implements SEAInterface {
 				if (platform.remove !== undefined) {
 					this.#check()
 					try {
-						runShell([...platform.remove, temp], shell)
+						executeShell([...platform.remove, temp], shell)
 					} catch (thrown: unknown) {
 						throw new SEAError('SIGN', 'Failed to strip existing signature', {
 							cause: thrown instanceof Error ? thrown.message : String(thrown),
@@ -316,7 +316,7 @@ export class SEA implements SEAInterface {
 				if (platform.sign !== undefined) {
 					this.#check()
 					try {
-						runShell([...platform.sign, temp], shell)
+						executeShell([...platform.sign, temp], shell)
 					} catch (thrown: unknown) {
 						throw new SEAError('SIGN', 'Failed to sign executable', {
 							cause: thrown instanceof Error ? thrown.message : String(thrown),
@@ -326,7 +326,7 @@ export class SEA implements SEAInterface {
 					if (platform.verify !== undefined) {
 						this.#check()
 						try {
-							runShell([...platform.verify, temp], shell)
+							executeShell([...platform.verify, temp], shell)
 						} catch (thrown: unknown) {
 							throw new SEAError('SIGN', 'Signature verification failed', {
 								cause: thrown instanceof Error ? thrown.message : String(thrown),
@@ -363,13 +363,13 @@ export class SEA implements SEAInterface {
 					this.#check()
 					// Resolve the certificate file against the SAME base #validate
 					// checked existence against — createSignCommand's argv is passed
-					// through runShell without a cwd, so a relative sign.file would
+					// through executeShell without a cwd, so a relative sign.file would
 					// otherwise resolve against process.cwd(), a different file.
 					const signInput =
 						sign.file !== undefined ? { ...sign, file: resolve(root, sign.file) } : sign
 					const signArgs = createSignCommand(signInput, temp)
 					try {
-						runShell(signArgs, shell)
+						executeShell(signArgs, shell)
 					} catch {
 						throw new SEAError('SIGN', 'Windows signing failed', { executable: temp })
 					}
@@ -378,7 +378,7 @@ export class SEA implements SEAInterface {
 					if (platform.verify !== undefined) {
 						this.#check()
 						try {
-							runShell([...platform.verify, temp], shell)
+							executeShell([...platform.verify, temp], shell)
 						} catch {
 							throw new SEAError('SIGN', 'Signature verification failed', { executable: temp })
 						}
