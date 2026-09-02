@@ -1,4 +1,5 @@
 /**
+ * Names the injection strategy per executable format:
  * PE  — adds an RT_RCDATA resource via resource directory rebuild.
  * ELF — appends a PT_NOTE segment with the blob as note data.
  * Mach-O — appends an LC_SEGMENT_64 load command with a section.
