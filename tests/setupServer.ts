@@ -18,6 +18,7 @@ import {
 	PE32_MAGIC,
 	PE32_PLUS_MAGIC,
 	PE_MAGIC,
+	PE_SECTION_HEADER_SIZE,
 	PE_SIGNATURE,
 } from '@src/server'
 
@@ -108,6 +109,10 @@ export interface PeFixtureOptions {
 	 * the security data directory at it (file offset + size), for exercising
 	 * {@link stripPESignature}'s certificate-overlay truncation. Default: none. */
 	readonly cert?: number
+	/** Pad the section table with uninitialized-data section headers until the
+	 * gap between it and the first section's data holds less than one section
+	 * entry, so the Injector's PE header-room check fails. Default: false. */
+	readonly tight?: boolean
 }
 
 function alignUp(value: number, alignment: number): number {
@@ -162,11 +167,13 @@ function buildPeResourceFixtureBytes(sectionVa: number): Buffer {
 /**
  * Build a minimal but structurally valid synthetic PE image for Injector
  * tests — one `.text` section, header slack for a new section entry, and
- * optionally PE32+ magic or a pre-existing `.rsrc` section.
+ * optionally PE32+ magic, a pre-existing `.rsrc` section, or a section table
+ * padded until that slack runs out.
  */
 export function buildPeFixture(options?: PeFixtureOptions): Buffer {
 	const plus = options?.plus ?? false
 	const resources = options?.resources ?? false
+	const tight = options?.tight ?? false
 
 	const fileAlignment = 0x200
 	const sectionAlignment = 0x1000
@@ -179,10 +186,20 @@ export function buildPeFixture(options?: PeFixtureOptions): Buffer {
 	const optionalOffset = coffOffset + 20
 	const sectionTableOffset = optionalOffset + optionalHeaderSize
 
-	const numberOfSections = resources ? 2 : 1
+	const baseSections = resources ? 2 : 1
 	const textRawOffset = fileAlignment
 	const textRawSize = fileAlignment
 	const textVa = 0x1000
+
+	// Each filler header consumes one entry's worth of the gap between the
+	// section table's end and the first section's data, so consuming every
+	// whole entry leaves a remainder smaller than one entry — the exact
+	// condition `#injectPE` refuses before it writes anything. The fillers
+	// carry no file bytes (PointerToRawData 0), so the first section's offset
+	// stays where the roomy layout puts it.
+	const baseSlack = textRawOffset - (sectionTableOffset + baseSections * PE_SECTION_HEADER_SIZE)
+	const fillerSections = tight ? Math.floor(baseSlack / PE_SECTION_HEADER_SIZE) : 0
+	const numberOfSections = baseSections + fillerSections
 
 	const rsrcVa = 0x2000
 	const resourceBuf = resources ? buildPeResourceFixtureBytes(rsrcVa) : undefined
@@ -274,6 +291,21 @@ export function buildPeFixture(options?: PeFixtureOptions): Buffer {
 		buf.writeUInt32LE(0x40000040, rsrcHeaderOffset + 36)
 
 		resourceBuf.copy(buf, rsrcRawOffset)
+	}
+
+	// Section table: the `.pad*` fillers a tight layout needs
+	for (let i = 0; i < fillerSections; i++) {
+		const fillerOffset = sectionTableOffset + (baseSections + i) * PE_SECTION_HEADER_SIZE
+		buf.write(`.pad${String(i)}`, fillerOffset, 8, 'ascii')
+		buf.writeUInt32LE(0x1000, fillerOffset + 8)
+		buf.writeUInt32LE(0x3000 + i * 0x1000, fillerOffset + 12)
+		buf.writeUInt32LE(0, fillerOffset + 16)
+		buf.writeUInt32LE(0, fillerOffset + 20)
+		buf.writeUInt32LE(0, fillerOffset + 24)
+		buf.writeUInt32LE(0, fillerOffset + 28)
+		buf.writeUInt16LE(0, fillerOffset + 32)
+		buf.writeUInt16LE(0, fillerOffset + 34)
+		buf.writeUInt32LE(0xc0000080, fillerOffset + 36)
 	}
 
 	const certSize = options?.cert
@@ -674,11 +706,23 @@ function writeMachoSectionEntry(buf: Buffer, offset: number, section: MachoSecti
 	buf.writeUInt32LE(0, offset + 76)
 }
 
+/** The `__LINKEDIT` segment {@link buildMachoFixture} emits. */
+export interface MachoLinkeditOptions {
+	/** Emit the `__LINKEDIT` segment command at all. Default: true. */
+	readonly present?: boolean
+	/** Section entries the `__LINKEDIT` segment command declares in `nsects` and
+	 * carries after its 72-byte header. Default: 0, the layout a real linker emits. */
+	readonly sections?: number
+}
+
 /** Options for {@link buildMachoFixture}. */
 export interface MachoFixtureOptions {
 	/** Place sections almost flush against the load-command table, so the
 	 * Injector's header-space ceiling check fails. Default: false. */
-	readonly tightHeaders?: boolean
+	readonly tight?: boolean
+	/** The `__LINKEDIT` segment command. Omitting it or giving it sections
+	 * produces a host layout the Injector refuses. */
+	readonly linkedit?: MachoLinkeditOptions
 }
 
 /**
@@ -686,18 +730,30 @@ export interface MachoFixtureOptions {
  * executable for Injector tests: `__TEXT` (fileoff 0), `__DATA`, `__LINKEDIT`
  * (last), plus an `LC_SYMTAB` and `LC_DYSYMTAB` whose offsets point into
  * `__LINKEDIT` — enough for `#injectMacho` to parse, shift, and inject.
+ *
+ * @remarks
+ * `linkedit` reshapes that last command into a host layout the Injector
+ * refuses: `present: false` drops the command, and `sections` makes it declare
+ * and carry section entries.
  */
 export function buildMachoFixture(options?: MachoFixtureOptions): Buffer {
-	const tight = options?.tightHeaders ?? false
+	const tight = options?.tight ?? false
+	const linkeditPresent = options?.linkedit?.present ?? true
+	const linkeditSections = options?.linkedit?.sections ?? 0
 
 	const headerSize = 32
 	const textCmdSize = 152 // 72-byte segment header + one 80-byte section
 	const dataCmdSize = 152
 	const symtabCmdSize = 24
 	const dysymtabCmdSize = 80
-	const linkeditCmdSize = 72
-	const sizeofcmds = textCmdSize + dataCmdSize + symtabCmdSize + dysymtabCmdSize + linkeditCmdSize
-	const ncmds = 5
+	const linkeditCmdSize = 72 + linkeditSections * 80
+	const sizeofcmds =
+		textCmdSize +
+		dataCmdSize +
+		symtabCmdSize +
+		dysymtabCmdSize +
+		(linkeditPresent ? linkeditCmdSize : 0)
+	const ncmds = linkeditPresent ? 5 : 4
 
 	const textCmdOffset = headerSize
 	const dataCmdOffset = textCmdOffset + textCmdSize
@@ -782,20 +838,36 @@ export function buildMachoFixture(options?: MachoFixtureOptions): Buffer {
 	buf.writeUInt32LE(linkeditFileOffset, dysymtabCmdOffset + 64) // extreloff
 	buf.writeUInt32LE(linkeditFileOffset, dysymtabCmdOffset + 72) // locreloff
 
-	// LC_SEGMENT_64 __LINKEDIT (last)
-	writeMachoSegment(buf, linkeditCmdOffset, {
-		cmd: MACHO_LC_SEGMENT_64,
-		size: linkeditCmdSize,
-		segName: '__LINKEDIT',
-		vmaddr: 0x100000000n + BigInt(linkeditFileOffset),
-		vmsize: BigInt(linkeditSize),
-		fileoff: BigInt(linkeditFileOffset),
-		filesize: BigInt(linkeditSize),
-		maxprot: 1,
-		initprot: 1,
-		nsects: 0,
-		flags: 0,
-	})
+	// LC_SEGMENT_64 __LINKEDIT (last). The segment's file range stays in the
+	// buffer when the command is omitted, so `LC_SYMTAB` keeps pointing at real
+	// bytes and the only thing missing is the command itself.
+	if (linkeditPresent) {
+		writeMachoSegment(buf, linkeditCmdOffset, {
+			cmd: MACHO_LC_SEGMENT_64,
+			size: linkeditCmdSize,
+			segName: '__LINKEDIT',
+			vmaddr: 0x100000000n + BigInt(linkeditFileOffset),
+			vmsize: BigInt(linkeditSize),
+			fileoff: BigInt(linkeditFileOffset),
+			filesize: BigInt(linkeditSize),
+			maxprot: 1,
+			initprot: 1,
+			nsects: linkeditSections,
+			flags: 0,
+		})
+		// Each declared section sits inside `__LINKEDIT`'s own file range, so it
+		// stays clear of the first section the Injector measures its header room
+		// against.
+		for (let s = 0; s < linkeditSections; s++) {
+			writeMachoSectionEntry(buf, linkeditCmdOffset + 72 + s * 80, {
+				sectName: `__link${String(s)}`,
+				segName: '__LINKEDIT',
+				addr: 0x100000000n + BigInt(linkeditFileOffset + s * 0x10),
+				size: 0x10n,
+				offset: linkeditFileOffset + s * 0x10,
+			})
+		}
+	}
 
 	return buf
 }

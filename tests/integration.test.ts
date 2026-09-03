@@ -165,10 +165,13 @@ describe('sea integration', () => {
 	}, 120000)
 
 	// Injects into the CURRENT node binary's real executable format. A host binary
-	// can leave no room for the write: a PE with less header slack than one section
-	// entry needs, or a Mach-O whose first section sits too close to its load-command
-	// table for another segment command. The injector reports either as `INJECT`, so
-	// that code is the applicability limit this skip covers.
+	// can carry a layout the injector cannot write into: a PE whose header slack is
+	// smaller than one section entry, a Mach-O whose first section sits inside the
+	// space another segment command needs, a Mach-O with no `__LINKEDIT` segment, or
+	// a `__LINKEDIT` segment carrying sections. The injector reads that layout out of
+	// the host's headers and load commands before it writes anything and reports it
+	// as `ROOM`, which is the only code this skip covers. Every other injector
+	// failure, `INJECT` included, fails this test.
 	it('supports stage hooks through the on option', async (context) => {
 		await withTestDir(
 			{
@@ -200,7 +203,7 @@ describe('sea integration', () => {
 					await sea.execute()
 				} catch (error) {
 					sea.destroy()
-					if (isSEAError(error) && error.code === 'INJECT') {
+					if (isSEAError(error) && error.code === 'ROOM') {
 						context.skip()
 						return
 					}

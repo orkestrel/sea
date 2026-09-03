@@ -351,7 +351,7 @@ describe('setupServer', () => {
 
 		it('leaves the tight variant no header room for another segment command', () => {
 			const roomy = buildMachoFixture()
-			const tight = buildMachoFixture({ tightHeaders: true })
+			const tight = buildMachoFixture({ tight: true })
 			// The injector appends one LC_SEGMENT_64 carrying one section entry: 72 + 80 bytes.
 			// A fixture with less than that between the end of the load commands (the 32-byte
 			// header plus `sizeofcmds` at offset 20) and the first section's data has no room.
@@ -366,6 +366,47 @@ describe('setupServer', () => {
 			expect(tight.readUInt32LE(sectionOffsetField) - (32 + tight.readUInt32LE(20))).toBeLessThan(
 				appended,
 			)
+		})
+
+		it('drops the __LINKEDIT segment command when the linkedit option omits it', () => {
+			const roomy = buildMachoFixture()
+			const without = buildMachoFixture({ linkedit: { present: false } })
+
+			expect(parseMachoSegments(without).map((segment) => segment.name)).toEqual([
+				'__TEXT',
+				'__DATA',
+			])
+			// The table stays self-consistent: `ncmds` at offset 16 and `sizeofcmds` at
+			// offset 20 both shrink by the dropped command, and the file keeps its
+			// length, so the bytes `__LINKEDIT` covered are still there for `LC_SYMTAB`
+			// to point at.
+			const commands = parseMachoLoadCommands(without)
+			expect(commands.length).toBe(parseMachoLoadCommands(roomy).length - 1)
+			expect(commands.reduce((total, command) => total + command.size, 0)).toBe(
+				without.readUInt32LE(20),
+			)
+			expect(without.readUInt32LE(16)).toBe(roomy.readUInt32LE(16) - 1)
+			expect(without.length).toBe(roomy.length)
+		})
+
+		it('gives the __LINKEDIT segment command the section entries the linkedit option asks for', () => {
+			const buf = buildMachoFixture({ linkedit: { sections: 1 } })
+			const linkedit = parseMachoSegments(buf).find((segment) => segment.name === '__LINKEDIT')
+			const section = findMachoSection(buf, '__LINKEDIT', '__link0')
+
+			expect(linkedit?.nsects).toBe(1)
+			// A declared entry is a real one: an LC_SEGMENT_64 command is 72 bytes plus
+			// 80 per section entry, and the entry's file offset sits inside the
+			// segment's own range rather than ahead of `__TEXT`.
+			const commands = parseMachoLoadCommands(buf)
+			const roomyCommands = parseMachoLoadCommands(buildMachoFixture())
+			expect(roomyCommands[roomyCommands.length - 1]?.size).toBe(72)
+			expect(commands[commands.length - 1]?.size).toBe(72 + 80)
+			expect(commands.reduce((total, command) => total + command.size, 0)).toBe(
+				buf.readUInt32LE(20),
+			)
+			expect(section?.segment).toBe('__LINKEDIT')
+			expect(section?.offset).toBe(linkedit?.fileoff)
 		})
 	})
 

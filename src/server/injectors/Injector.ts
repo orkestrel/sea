@@ -279,7 +279,7 @@ export class Injector implements InjectorInterface {
 			const availableHeaderSpace = firstSectionFileOffset - sectionTableEnd
 			if (availableHeaderSpace < PE_SECTION_HEADER_SIZE) {
 				throw new SEAError(
-					'INJECT',
+					'ROOM',
 					'No room in PE header for a new section entry ' +
 						`(${String(availableHeaderSpace)} bytes available, need ${String(PE_SECTION_HEADER_SIZE)})`,
 					{
@@ -1329,7 +1329,7 @@ export class Injector implements InjectorInterface {
 			}
 			const linkeditCmd = linkeditIndex === -1 ? undefined : commands[linkeditIndex]
 			if (linkeditCmd === undefined) {
-				throw new SEAError('INJECT', 'Mach-O binary has no __LINKEDIT segment', {
+				throw new SEAError('ROOM', 'Mach-O binary has no __LINKEDIT segment', {
 					executable: exePath,
 				})
 			}
@@ -1373,7 +1373,7 @@ export class Injector implements InjectorInterface {
 
 			if (headerSize + newSizeofcmds + 16 > firstSectionOffset) {
 				throw new SEAError(
-					'INJECT',
+					'ROOM',
 					`Not enough header space for new Mach-O load command ` +
 						`(need offset ${String(headerSize + newSizeofcmds + 16)}, first section at ${String(firstSectionOffset)})`,
 					{
@@ -1399,7 +1399,7 @@ export class Injector implements InjectorInterface {
 					if (segName === '__LINKEDIT') {
 						const nsects = buf.readUInt32LE(cmd.offset + 64)
 						if (nsects > 0) {
-							throw new SEAError('INJECT', '__LINKEDIT segment with sections is not supported', {
+							throw new SEAError('ROOM', '__LINKEDIT segment with sections is not supported', {
 								executable: exePath,
 							})
 						}

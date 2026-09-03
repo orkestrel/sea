@@ -1,7 +1,7 @@
 import { chmodSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { Injector, isSEAError, SEA_SENTINEL_FUSE } from '@src/server'
+import { Injector, isSEAError, PE_SECTION_HEADER_SIZE, SEA_SENTINEL_FUSE } from '@src/server'
 import {
 	buildElfFixture,
 	buildFatMachoFixture,
@@ -293,19 +293,75 @@ describe('Injector', () => {
 			})
 		})
 
-		it('throws INJECT when there is not enough header space for the new load command', async () => {
+		it('throws ROOM, not INJECT, when the first section leaves no header space for the new load command', async () => {
 			await withTestDir({}, async (scratch) => {
 				const executable = join(scratch.path, 'test')
 				const blob = join(scratch.path, 'blob.bin')
 
-				writeFileSync(executable, buildMachoFixture({ tightHeaders: true }))
+				const fixture = buildMachoFixture({ tight: true })
+				writeFileSync(executable, fixture)
 				scratch.write('blob.bin', 'blob content')
 
 				const error = captureError(() => {
 					new Injector(createInjectorOptions({ executable, blob })).inject()
 				})
 
-				expect(isSEAError(error) && error.code === 'INJECT').toBe(true)
+				// A host binary's layout, not a defect in the injector: the layout
+				// limit and an injector defect read the same until the code
+				// separates them, so assert the code and the measurements a caller
+				// retries on another host with. The expected offset is read back
+				// out of the fixture, never restated.
+				const firstSectionOffset = findMachoSection(fixture, '__TEXT', '__text')?.offset
+				expect(isSEAError(error) && error.code).toBe('ROOM')
+				expect(isSEAError(error) && error.context).toMatchObject({
+					executable,
+					firstSectionOffset,
+				})
+				const required = isSEAError(error) ? error.context?.['requiredOffset'] : undefined
+				expect(typeof required === 'number' && required > (firstSectionOffset ?? 0)).toBe(true)
+			})
+		})
+
+		it('throws ROOM, not INJECT, when the host Mach-O carries no __LINKEDIT segment', async () => {
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
+
+				writeFileSync(executable, buildMachoFixture({ linkedit: { present: false } }))
+				scratch.write('blob.bin', 'blob content')
+
+				const error = captureError(() => {
+					new Injector(createInjectorOptions({ executable, blob })).inject()
+				})
+
+				// The injector reads the segment list out of the host's load commands
+				// before it writes anything, so a binary the linker left without
+				// `__LINKEDIT` is a layout to retry elsewhere, not an injector defect.
+				// The message pins which layout refused it.
+				expect(isSEAError(error) && error.code).toBe('ROOM')
+				expect(isSEAError(error) && error.message).toContain('no __LINKEDIT segment')
+				expect(isSEAError(error) && error.context).toMatchObject({ executable })
+			})
+		})
+
+		it('throws ROOM, not INJECT, when the host __LINKEDIT segment carries sections', async () => {
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test')
+				const blob = join(scratch.path, 'blob.bin')
+
+				writeFileSync(executable, buildMachoFixture({ linkedit: { sections: 1 } }))
+				scratch.write('blob.bin', 'blob content')
+
+				const error = captureError(() => {
+					new Injector(createInjectorOptions({ executable, blob })).inject()
+				})
+
+				// `__LINKEDIT` carrying section entries is a host layout the shift the
+				// injector performs does not support, read from the segment's own
+				// `nsects` field and refused before any byte reaches the output.
+				expect(isSEAError(error) && error.code).toBe('ROOM')
+				expect(isSEAError(error) && error.message).toContain('with sections is not supported')
+				expect(isSEAError(error) && error.context).toMatchObject({ executable })
 			})
 		})
 
@@ -446,6 +502,31 @@ describe('Injector', () => {
 				const blobLeaf = leaves.find((l) => l.nameName?.toUpperCase() === 'NODE_SEA_BLOB')
 				expect(blobLeaf).toBeDefined()
 				expect(blobLeaf?.data.length).toBe('the injected blob'.length)
+			})
+		})
+
+		it('throws ROOM, not INJECT, when the PE header has less slack than one section entry needs', async () => {
+			await withTestDir({}, async (scratch) => {
+				const executable = join(scratch.path, 'test.exe')
+				const blob = join(scratch.path, 'blob.bin')
+
+				writeFileSync(executable, buildPeFixture({ tight: true }))
+				scratch.write('blob.bin', 'blob content')
+
+				const error = captureError(() => {
+					new Injector(createInjectorOptions({ executable, blob })).inject()
+				})
+
+				// A host binary's layout, not a defect in the injector. The
+				// available space is what a caller reports when it retries on
+				// another host, so assert it against the constant it falls short of.
+				expect(isSEAError(error) && error.code).toBe('ROOM')
+				expect(isSEAError(error) && error.context).toMatchObject({
+					executable,
+					requiredHeaderSpace: PE_SECTION_HEADER_SIZE,
+				})
+				const available = isSEAError(error) ? error.context?.['availableHeaderSpace'] : undefined
+				expect(typeof available === 'number' && available < PE_SECTION_HEADER_SIZE).toBe(true)
 			})
 		})
 

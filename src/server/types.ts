@@ -350,6 +350,8 @@ export type SEAStatus = 'idle' | 'active' | 'done' | 'error'
  * `BLOB`     — SEA blob generation failure.
  * `FORMAT`   — unrecognized executable binary format.
  * `INJECT`   — resource injection failure.
+ * `ROOM`     — host binary layout the injector cannot write into: no room for a new
+ *             section entry or load command, or a `__LINKEDIT` layout it does not support.
  * `FUSE`     — sentinel fuse patch failure.
  * `SIGN`     — code signing failure.
  * `SHELL`    — shell command exited non-zero.
@@ -366,6 +368,7 @@ export type SEAErrorCode =
 	| 'BLOB'
 	| 'FORMAT'
 	| 'INJECT'
+	| 'ROOM'
 	| 'FUSE'
 	| 'SIGN'
 	| 'SHELL'
