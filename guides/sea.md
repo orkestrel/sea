@@ -23,13 +23,13 @@ process.stdout.write(
 )
 ```
 
-`sea.execute()` runs the three-step pipeline — compress assets, generate the blob, assemble and sign the executable — and transitions `sea.status` from `'idle'` to `'active'` to `'done'` (or `'error'`). `sea.emitter` reports progress on `compress`, `progress` (once per compressed file, with `current`/`total` counts), `blob`, `assemble`, and `complete`.
+`sea.execute()` runs the pipeline — compress assets, generate the blob, assemble and sign the executable — and transitions `sea.status` from `'idle'` to `'active'` to `'done'` (or `'error'`). `sea.emitter` reports progress on `compress`, `progress` (once per compressed file, with `current`/`total` counts), `blob`, `assemble`, and `complete`.
 
 When an `assets` path is compressed by `compression`, blob generation embeds the Brotli output under that asset's original key. Uncompressed entries keep their original paths, the compression manifest still reports each output path, and SEA does not mutate the caller's `assets` record.
 
 On Windows, `SEAOptions.windows.terminal` (default `true`) selects whether the executable keeps its console window: `false` builds a GUI-subsystem binary that launches without a terminal, at the cost of detached stdio when no console is attached (console output is discarded).
 
-On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When present, the assembled executable is signed with `signtool` (cert `file` + `password`, or a store `thumbprint` — exactly one of the two) and verified as the LAST content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`), matching prior behavior exactly. `createSignCommand` builds the `signtool` argv and is available standalone.
+On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When present, the assembled executable is signed with `signtool` (cert `file` + `password`, or a store `thumbprint` — exactly one of the two) and verified as the LAST content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`). `buildSignCommand` builds the `signtool` argv and is available standalone.
 
 `SEAOptions.entry` is a `SEAEntryOptions` object (`{ path, format? }`) rather than a bare path — `format` selects the entry module format (`'cjs'` default, or `'esm'` on Node >= 25.7). Every domain failure throws a `SEAError` carrying a machine-readable `SEAErrorCode`; narrow a caught value with `isSEAError`. `SEAResult` additionally reports `signed`, `stripped`, and the patched `terminal` flag (Windows only).
 
@@ -65,9 +65,7 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `WINDOWS_SUBSYSTEM_GUI`           | const | Windows PE subsystem value: GUI application (no terminal window).           |
 | `WINDOWS_SUBSYSTEM_CONSOLE`       | const | Windows PE subsystem value: console application.                            |
 | `BROTLI_EXTENSION`                | const | File extension indicating Brotli compression.                               |
-| `SKIP_EXTENSIONS`                 | const | File extensions that should NOT be Brotli-compressed.                       |
-| `CLIENT_ASSET_KEY_RAW`            | const | Asset key for the raw (uncompressed) client HTML entry.                     |
-| `CLIENT_ASSET_KEY_BR`             | const | Asset key for the Brotli-compressed client HTML entry.                      |
+| `SKIP_EXTENSIONS`                 | const | File extensions Brotli compression skips.                                   |
 | `PE_MAGIC`                        | const | DOS MZ header magic (first 2 bytes of a PE file).                           |
 | `PE_SIGNATURE`                    | const | PE signature: "PE\0\0" as a 32-bit value.                                   |
 | `PE32_MAGIC`                      | const | PE32 optional header magic.                                                 |
@@ -76,6 +74,10 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `ELF_CLASS_64`                    | const | ELF 64-bit class identifier.                                                |
 | `ELF_DATA_LSB`                    | const | ELF little-endian data encoding.                                            |
 | `ELF_PT_NOTE`                     | const | ELF program header type: note segment.                                      |
+| `ELF_PT_LOAD`                     | const | ELF program header type: loadable segment.                                  |
+| `ELF_PT_PHDR`                     | const | ELF program header type: the program header table itself.                   |
+| `ELF_PF_R`                        | const | ELF segment permission flag marking a segment readable.                     |
+| `ELF_PAGE_SIZE`                   | const | Page size an injected ELF segment is aligned to.                            |
 | `MACHO_MAGIC_64`                  | const | Mach-O 64-bit magic (little-endian).                                        |
 | `MACHO_LC_SEGMENT_64`             | const | Mach-O LC_SEGMENT_64 load command.                                          |
 | `PE_RT_RCDATA`                    | const | PE resource type: RT_RCDATA (raw data).                                     |
@@ -96,10 +98,10 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | API                   | Kind     | Summary                                                                         |
 | --------------------- | -------- | ------------------------------------------------------------------------------- |
 | `isExecutableFormat`  | function | Check if a value is a valid `ExecutableFormat`.                                 |
-| `platformConfig`      | function | Get the platform configuration for the current OS.                              |
+| `resolvePlatform`     | function | Resolve the effective platform configuration.                                   |
 | `isPlatformSupported` | function | Check if the current or specified platform is supported for SEA builds.         |
 | `ensureExists`        | function | Assert that a path exists, throwing with a descriptive message if not.          |
-| `isCompressible`      | function | Check if a file should be Brotli-compressed based on its extension.             |
+| `isCompressible`      | function | Check whether a file's extension is outside `SKIP_EXTENSIONS`.                  |
 | `walkDirectory`       | function | Recursively walk a directory and return all file paths.                         |
 | `executeShell`        | function | Execute a command synchronously and return stdout; throws `ShellError`.         |
 | `redactCommand`       | function | Redact a shell command's arguments for safe inclusion in error messages.        |
@@ -119,21 +121,21 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `isPEExecutable`      | function | Check if a file is a Windows PE executable.                                     |
 | `patchPESubsystem`    | function | Patch the PE subsystem field in a Windows executable.                           |
 | `stripPESignature`    | function | Remove the Authenticode signature from a PE executable.                         |
-| `createSignCommand`   | function | Build the `signtool sign` argv for signing a Windows executable.                |
+| `buildSignCommand`    | function | Build the `signtool sign` argv for signing a Windows executable.                |
 | `formatSize`          | function | Format a byte count as a human-readable string.                                 |
 | `ensureSafeKey`       | function | Assert that an asset key is safe to use as a relative filesystem key.           |
 | `ensureContained`     | function | Assert a path real-path-resolves inside a base root (blocks symlink escape).    |
 | `ensureSafeName`      | function | Assert that a name is a single safe path segment (output executable base name). |
 | `finalizeExecutable`  | function | Durably flush and atomically move a built executable into place.                |
 | `syncDirectory`       | function | Fsync a directory to durably persist a prior file rename/create within it.      |
-| `createBlobConfig`    | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
+| `buildBlobConfig`     | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
 | `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                          |
 | `buildELFNoteHeader`  | function | Build an ELF `PT_NOTE` entry's header bytes for the SEA blob note.              |
 | `alignELFNoteSize`    | function | Round an ELF note payload size up to its four-byte alignment boundary.          |
 | `isPowerOfTwo`        | function | Whether a positive integer is an exact power of two.                            |
 | `copyRange`           | function | Stream a byte range between two file descriptors in fixed-size chunks.          |
 | `openBrowser`         | function | Launch the system default browser at an http(s) URL.                            |
-| `SEAError`            | class    | The coded base error for every failure raised by the seal build.                |
+| `SEAError`            | class    | The coded base error for every failure raised by the SEA build.                 |
 | `isSEAError`          | function | Whether a value is a `SEAError`.                                                |
 | `ShellError`          | class    | Error `executeShell` throws when a command exits non-zero.                      |
 | `isShellError`        | function | Whether a value is a `ShellError`.                                              |
@@ -148,11 +150,16 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `SEACompressionManifest` | interface | Manifest summarizing all compressed assets.                                  |
 | `SEAProgress`            | interface | Progress reported while compressing a directory (`path`/`current`/`total`).  |
 | `SEACompressionHandler`  | type      | Callback `compressDirectory` invokes after each file it compresses.          |
+| `SEABrotliOptions`       | interface | Options controlling how Brotli encodes one file (`mode` / `quality`).        |
 | `SEACompressionOptions`  | interface | Options controlling Brotli compression of one or more directories.           |
 | `SEAPlatform`            | interface | Platform-specific SEA build configuration.                                   |
 | `SEAShellOptions`        | interface | Options for executing a shell command.                                       |
 | `ExecutableFormat`       | type      | Executable binary format detected from file header magic bytes.              |
 | `ELFNoteHeader`          | interface | An ELF `PT_NOTE` entry's header bytes and the entry's on-disk size.          |
+| `ELFProgramHeader`       | interface | One ELF64 program header entry, transliterating `Elf64_Phdr`.                |
+| `PEResourceLeaf`         | interface | One leaf of a PE resource directory tree, with its data entry.               |
+| `PEResourceEntry`        | interface | One language entry of a PE resource name directory.                          |
+| `PESection`              | interface | One PE section table entry, with the file offset it was read from.           |
 | `InjectorOptions`        | interface | Options for injecting a resource into an executable.                         |
 | `InjectorMachOOptions`   | interface | Mach-O specific injector options.                                            |
 | `InjectorInterface`      | interface | Cross-platform binary resource injector contract.                            |
@@ -161,7 +168,7 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `AssetManagerEventMap`   | type      | Events emitted by an `AssetManagerInterface`.                                |
 | `AssetManagerOptions`    | interface | Options for creating an `AssetManagerInterface`.                             |
 | `AssetManagerInterface`  | interface | Named asset collection with SEA and disk loading.                            |
-| `SEAStatus`              | type      | Overall status of the seal build.                                            |
+| `SEAStatus`              | type      | Overall status of the SEA build.                                             |
 | `SEAErrorCode`           | type      | Machine-readable error code carried by every `SEAError`.                     |
 | `SEAEntryFormat`         | type      | SEA entry point module format (`cjs` / `esm`).                               |
 | `SEAEntryOptions`        | interface | Options describing the SEA entry point (path and module format).             |
@@ -170,16 +177,16 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 | `SEAOptions`             | interface | Options for creating a SEA build, including a per-command timeout.           |
 | `SEAWindowsOptions`      | interface | Windows-specific SEA build options.                                          |
 | `SEAWindowsSignOptions`  | interface | Windows Authenticode signing options, passed through to `signtool`.          |
-| `SEAResult`              | interface | Result of a successful seal build (adds `signed`, `stripped`, `terminal`).   |
+| `SEAResult`              | interface | Result of a successful SEA build (adds `signed`, `stripped`, `terminal`).    |
 | `SEAInterface`           | interface | SEA build orchestrator contract.                                             |
 
 ## Methods
 
-The public methods of each behavioral interface — every call-signature member listed (a `readonly` data member, e.g. `format` or `emitter`, stays a Surface row). Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface (AGENTS §22).
+The public methods of each behavioral interface — every call-signature member listed (a `readonly` data member, for example `format` or `emitter`, stays a Surface row). Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface.
 
 #### `SEAInterface`
 
-`execute` runs the build pipeline; `destroy` is the §10 teardown.
+`execute` runs the build pipeline; `destroy` tears down the emitter.
 
 | Method    | Returns              | Behavior                                                                |
 | --------- | -------------------- | ----------------------------------------------------------------------- |
@@ -196,17 +203,17 @@ The public methods of each behavioral interface — every call-signature member 
 
 #### `AssetManagerInterface`
 
-`asset` / `assets` are the §9.1 singular/plural accessors; `register` / `load` add assets; `clear` / `destroy` are the §10 lifecycle pair.
+`asset` / `assets` are the singular/plural accessors; `register` / `load` add assets; `clear` / `destroy` are the lifecycle pair.
 
-| Method     | Returns                       | Behavior                                                     |
-| ---------- | ----------------------------- | ------------------------------------------------------------ |
-| `asset`    | `AssetInterface \| undefined` | Look up one registered asset by key.                         |
-| `assets`   | `readonly AssetInterface[]`   | List all registered assets, in registration order.           |
-| `keys`     | `readonly string[]`           | List all registered asset keys, in registration order.       |
-| `register` | `void`                        | Register one or more assets.                                 |
-| `load`     | `void`                        | Load client assets from disk (no-op inside SEA mode).        |
-| `clear`    | `void`                        | Remove all registered assets without destroying the manager. |
-| `destroy`  | `void`                        | Clear all assets and tear down the emitter.                  |
+| Method     | Returns                       | Behavior                                                      |
+| ---------- | ----------------------------- | ------------------------------------------------------------- |
+| `asset`    | `AssetInterface \| undefined` | Look up one registered asset by key.                          |
+| `assets`   | `readonly AssetInterface[]`   | List all registered assets, in registration order.            |
+| `keys`     | `readonly string[]`           | List all registered asset keys, in registration order.        |
+| `register` | `void`                        | Register one or more assets.                                  |
+| `load`     | `void`                        | Load the configured assets from disk (no-op inside SEA mode). |
+| `clear`    | `void`                        | Remove all registered assets without destroying the manager.  |
+| `destroy`  | `void`                        | Clear all assets and tear down the emitter.                   |
 
 ## Usage
 
@@ -236,9 +243,12 @@ const asset = createAsset({ key: 'client.html.br', content: compressedBuffer })
 asset.key // 'client.html.br'
 asset.compressed // true (inferred from .br extension)
 
-const manager = createAssetManager({ root: process.cwd() })
+const manager = createAssetManager({
+	root: process.cwd(),
+	assets: { 'client.html.br': 'dist/client/client.html.br' },
+})
 manager.register(asset)
-manager.load() // disk fallback outside SEA mode; no-op inside SEA mode
+manager.load() // reads the configured assets outside SEA mode; no-op inside SEA mode
 manager.asset('client.html.br')
 manager.assets()
 manager.keys()
@@ -253,7 +263,7 @@ import {
 	executeShell,
 	redactCommand,
 	isShellError,
-	platformConfig,
+	resolvePlatform,
 	isPlatformSupported,
 	ensureExists,
 	isCompressible,
@@ -280,7 +290,7 @@ import {
 	ensureContained,
 	ensureSafeName,
 	openBrowser,
-	createSignCommand,
+	buildSignCommand,
 	syncDirectory,
 	alignELFNoteSize,
 	isPowerOfTwo,
@@ -295,7 +305,7 @@ try {
 	}
 }
 
-platformConfig() // SEAPlatform for process.platform, or undefined
+resolvePlatform() // SEAPlatform for process.platform, or undefined
 isPlatformSupported() // true on win32 / darwin / linux
 
 ensureExists('dist/server/serve.cjs', 'entry file is missing')
@@ -304,7 +314,7 @@ isCompressible('dist/app/browser/index.html') // true — not in SKIP_EXTENSIONS
 
 const size = computeSize(1000, 400) // { original: 1000, compressed: 400, ratio: 0.4 }
 compressFile('dist/index.html', 'dist/index.html.br')
-compressDirectory('dist/app/browser', { paths: ['dist/app/browser'] })
+compressDirectory('dist/app/browser', { mode: 'text' })
 
 formatSize(size.compressed) // '400 B'
 
@@ -325,7 +335,7 @@ ensureContained('/dist/app', 'browser') // real, symlink-resolved path inside th
 openBrowser('http://localhost:3000') // best-effort launch of the system default browser
 ensureSafeName('myapp') // ok; throws SEAError('ASSET', ...) for '../evil' or 'a/b'
 
-createSignCommand({ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' }, 'dist/sea/app.exe')
+buildSignCommand({ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' }, 'dist/sea/app.exe')
 // ['signtool', 'sign', '/fd', 'sha256', '/sha1', 'AABBCCDDEEFF00112233445566778899AABBCCDD', 'dist/sea/app.exe']
 
 syncDirectory('/dist/sea') // fsync a directory to durably persist a prior rename/create; no-op on win32

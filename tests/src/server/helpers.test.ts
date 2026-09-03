@@ -10,8 +10,8 @@ import {
 	compressFile,
 	computeSize,
 	copyRange,
-	createBlobConfig,
-	createSignCommand,
+	buildBlobConfig,
+	buildSignCommand,
 	ensureContained,
 	ensureSafeKey,
 	ensureSafeName,
@@ -24,7 +24,7 @@ import {
 	isSEAError,
 	isShellError,
 	openBrowser,
-	platformConfig,
+	resolvePlatform,
 	patchPESubsystem,
 	patchSentinelFuse,
 	readPEOffset,
@@ -45,14 +45,14 @@ import { captureError } from '@orkestrel/test'
 
 describe('helpers', () => {
 	describe('isPlatformSupported', () => {
-		it('agrees with platformConfig on every platform identifier', () => {
+		it('agrees with resolvePlatform on every platform identifier', () => {
 			for (const platform of ['win32', 'darwin', 'linux', 'aix', '']) {
-				expect(isPlatformSupported(platform)).toBe(platformConfig(platform) !== undefined)
+				expect(isPlatformSupported(platform)).toBe(resolvePlatform(platform) !== undefined)
 			}
 		})
 
 		it('reports the host platform as supported when it has a configuration', () => {
-			expect(isPlatformSupported()).toBe(platformConfig() !== undefined)
+			expect(isPlatformSupported()).toBe(resolvePlatform() !== undefined)
 		})
 	})
 
@@ -343,9 +343,9 @@ describe('helpers', () => {
 		})
 	})
 
-	describe('createBlobConfig', () => {
+	describe('buildBlobConfig', () => {
 		it('applies defaults for a cjs entry', () => {
-			const config = createBlobConfig({ path: 'entry.cjs' }, 'blob.bin', undefined)
+			const config = buildBlobConfig({ path: 'entry.cjs' }, 'blob.bin', undefined)
 
 			expect(config.useCodeCache).toBe(true)
 			expect(config.useSnapshot).toBe(false)
@@ -354,7 +354,7 @@ describe('helpers', () => {
 		})
 
 		it('flips cache and snapshot from blob options', () => {
-			const config = createBlobConfig({ path: 'entry.cjs' }, 'blob.bin', undefined, {
+			const config = buildBlobConfig({ path: 'entry.cjs' }, 'blob.bin', undefined, {
 				cache: false,
 				snapshot: true,
 			})
@@ -364,14 +364,14 @@ describe('helpers', () => {
 		})
 
 		it('emits mainFormat module for an esm entry', () => {
-			const config = createBlobConfig({ path: 'entry.mjs', format: 'esm' }, 'blob.bin', undefined)
+			const config = buildBlobConfig({ path: 'entry.mjs', format: 'esm' }, 'blob.bin', undefined)
 
 			expect(config.mainFormat).toBe('module')
 		})
 
 		it('throws BLOB when esm is combined with useSnapshot', () => {
 			const error = captureError(() => {
-				return createBlobConfig({ path: 'entry.mjs', format: 'esm' }, 'blob.bin', undefined, {
+				return buildBlobConfig({ path: 'entry.mjs', format: 'esm' }, 'blob.bin', undefined, {
 					snapshot: true,
 				})
 			})
@@ -380,8 +380,8 @@ describe('helpers', () => {
 		})
 
 		it('includes assets only when provided', () => {
-			const withAssets = createBlobConfig({ path: 'entry.cjs' }, 'blob.bin', { key: 'value' })
-			const withoutAssets = createBlobConfig({ path: 'entry.cjs' }, 'blob.bin', undefined)
+			const withAssets = buildBlobConfig({ path: 'entry.cjs' }, 'blob.bin', { key: 'value' })
+			const withoutAssets = buildBlobConfig({ path: 'entry.cjs' }, 'blob.bin', undefined)
 
 			expect(withAssets.assets).toEqual({ key: 'value' })
 			expect('assets' in withoutAssets).toBe(false)
@@ -532,9 +532,9 @@ describe('helpers', () => {
 		})
 	})
 
-	describe('createSignCommand', () => {
+	describe('buildSignCommand', () => {
 		it('builds argv for a cert file + password', () => {
-			const argv = createSignCommand(
+			const argv = buildSignCommand(
 				{ file: 'cert.pfx', password: 'dummy-password' },
 				'dist/app.exe',
 			)
@@ -553,7 +553,7 @@ describe('helpers', () => {
 		})
 
 		it('builds argv for a store thumbprint', () => {
-			const argv = createSignCommand(
+			const argv = buildSignCommand(
 				{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' },
 				'dist/app.exe',
 			)
@@ -570,7 +570,7 @@ describe('helpers', () => {
 		})
 
 		it('appends /tr and /td when a timestamp is set', () => {
-			const argv = createSignCommand(
+			const argv = buildSignCommand(
 				{
 					thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD',
 					timestamp: 'http://timestamp.example.com',
@@ -594,7 +594,7 @@ describe('helpers', () => {
 		})
 
 		it('uses a custom digest for /fd and /td', () => {
-			const argv = createSignCommand(
+			const argv = buildSignCommand(
 				{
 					thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD',
 					timestamp: 'https://timestamp.example.com',
@@ -620,7 +620,7 @@ describe('helpers', () => {
 
 		it('throws SEAError code SIGN when neither file nor thumbprint is set', () => {
 			const error = captureError(() => {
-				createSignCommand({}, 'dist/app.exe')
+				buildSignCommand({}, 'dist/app.exe')
 			})
 
 			expect(isSEAError(error) && error.code === 'SIGN').toBe(true)
@@ -628,7 +628,7 @@ describe('helpers', () => {
 
 		it('throws SEAError code SIGN when both file and thumbprint are set', () => {
 			const error = captureError(() => {
-				createSignCommand(
+				buildSignCommand(
 					{ file: 'cert.pfx', thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' },
 					'dist/app.exe',
 				)
@@ -639,7 +639,7 @@ describe('helpers', () => {
 
 		it('throws SEAError code SIGN when timestamp is not an http(s) URL', () => {
 			const error = captureError(() => {
-				createSignCommand(
+				buildSignCommand(
 					{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', timestamp: 'ftp://x' },
 					'dist/app.exe',
 				)
@@ -650,7 +650,7 @@ describe('helpers', () => {
 
 		it('throws SEAError code SIGN when timestamp is unparseable', () => {
 			const error = captureError(() => {
-				createSignCommand(
+				buildSignCommand(
 					{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', timestamp: 'not a url' },
 					'dist/app.exe',
 				)
@@ -661,7 +661,7 @@ describe('helpers', () => {
 
 		it('throws SEAError code SIGN for an unsupported digest', () => {
 			const error = captureError(() => {
-				createSignCommand(
+				buildSignCommand(
 					{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', digest: 'md5' },
 					'dist/app.exe',
 				)
@@ -671,7 +671,7 @@ describe('helpers', () => {
 		})
 
 		it('accepts sha384 and emits it for /fd', () => {
-			const argv = createSignCommand(
+			const argv = buildSignCommand(
 				{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD', digest: 'sha384' },
 				'dist/app.exe',
 			)
@@ -704,14 +704,32 @@ describe('helpers', () => {
 			})
 		})
 
-		it('returns 0 for a file too short to contain the e_lfanew field', async () => {
+		it('throws FORMAT for a file too short to contain the e_lfanew field', async () => {
 			await withTestDir({}, (scratch) => {
 				const path = join(scratch.path, 'short.bin')
 				writeFileSync(path, Buffer.alloc(8))
 
 				const fd = openSync(path, 'r')
 				try {
-					expect(readPEOffset(fd)).toBe(0)
+					const error = captureError(() => readPEOffset(fd))
+
+					expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+
+		it('throws FORMAT when readU16 cannot fill its two bytes', async () => {
+			await withTestDir({}, (scratch) => {
+				const path = join(scratch.path, 'one-byte.bin')
+				writeFileSync(path, Buffer.alloc(1))
+
+				const fd = openSync(path, 'r')
+				try {
+					const error = captureError(() => readU16(fd, 0))
+
+					expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
 				} finally {
 					closeSync(fd)
 				}
@@ -815,7 +833,7 @@ describe('helpers', () => {
 
 				// Plant a nonzero directory entry so zeroing is observable, without
 				// making it point at a real trailing certificate (offset+size !=
-				// EOF here), so no truncation should occur.
+				// EOF here), so no truncation occurs.
 				buf.writeUInt32LE(0x1234, securityDirOffset)
 				buf.writeUInt32LE(0x10, securityDirOffset + 4)
 				const before = Buffer.from(buf)
@@ -1087,6 +1105,19 @@ describe('helpers', () => {
 				}
 			})
 		})
+
+		it('throws FORMAT when readU32 cannot fill its four bytes', async () => {
+			await withTestDir({ 'binary.bin': '\0\0' }, (scratch) => {
+				const fd = openSync(join(scratch.path, 'binary.bin'), 'r')
+				try {
+					const error = captureError(() => readU32(fd, 0))
+
+					expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
 	})
 
 	describe('readU64 and writeU64', () => {
@@ -1098,6 +1129,19 @@ describe('helpers', () => {
 
 					expect(readU64(fd, 8)).toBe(0x0102030405060708n)
 					expect(readU64(fd, 0)).toBe(0n)
+				} finally {
+					closeSync(fd)
+				}
+			})
+		})
+
+		it('throws FORMAT when readU64 cannot fill its eight bytes', async () => {
+			await withTestDir({ 'binary.bin': '\0\0\0\0' }, (scratch) => {
+				const fd = openSync(join(scratch.path, 'binary.bin'), 'r')
+				try {
+					const error = captureError(() => readU64(fd, 0))
+
+					expect(isSEAError(error) && error.code === 'FORMAT').toBe(true)
 				} finally {
 					closeSync(fd)
 				}

@@ -5,6 +5,7 @@
 // than the constants the builders write from. The `setup` project runs in Node, so every contract
 // here is reachable with real files.
 
+import type { PeResourceLeaf } from './setupServer.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -21,6 +22,8 @@ import {
 	parseMachoLoadCommands,
 	parseMachoSegments,
 	parsePeResourceLeaves,
+	readPeResourceString,
+	walkPeResourceDirectory,
 	withTestDir,
 	WORKSPACE_ROOT,
 } from './setupServer.js'
@@ -87,15 +90,15 @@ describe('setupServer', () => {
 	describe('createSEAOptions', () => {
 		it('builds a complete option set an override replaces one field of', () => {
 			expect(createSEAOptions()).toEqual({
-				name: 'seal-test',
+				name: 'sea-test',
 				entry: { path: 'entry.cjs' },
 				output: 'dist',
 			})
-			expect(createSEAOptions({ output: 'build', root: '/tmp/seal' })).toEqual({
-				name: 'seal-test',
+			expect(createSEAOptions({ output: 'build', root: '/tmp/sea' })).toEqual({
+				name: 'sea-test',
 				entry: { path: 'entry.cjs' },
 				output: 'build',
-				root: '/tmp/seal',
+				root: '/tmp/sea',
 			})
 		})
 	})
@@ -209,6 +212,59 @@ describe('setupServer', () => {
 			expect(buf.subarray(plain.length).every((byte) => byte === 0xcc)).toBe(true)
 
 			expect(plain.readUInt32LE(plain.readUInt32LE(0x3c) + 24 + 96 + 32)).toBe(0)
+		})
+	})
+
+	describe('readPeResourceString', () => {
+		it('reads the declared number of UTF-16LE characters and stops there', () => {
+			const buf = Buffer.alloc(24)
+			buf.writeUInt16LE(4, 2)
+			buf.write('NAMEtrailing', 4, 'utf16le')
+
+			expect(readPeResourceString(buf, 2)).toBe('NAME')
+		})
+
+		it('returns an empty string for a zero-length entry', () => {
+			const buf = Buffer.alloc(8)
+			buf.writeUInt16LE(0, 0)
+			buf.write('XY', 2, 'utf16le')
+
+			expect(readPeResourceString(buf, 0)).toBe('')
+		})
+	})
+
+	describe('walkPeResourceDirectory', () => {
+		it('collects each leaf of a directory tree with its type, name, and data', () => {
+			const buf = buildPeFixture({ resources: true })
+			// The `.rsrc` header is the second section table entry: 24 bytes of PE and COFF
+			// header, the 224-byte PE32 optional header, then one 40-byte entry.
+			const rsrcHeaderOffset = buf.readUInt32LE(0x3c) + 24 + 224 + 40
+			const section = {
+				name: '.rsrc',
+				virtualSize: buf.readUInt32LE(rsrcHeaderOffset + 8),
+				virtualAddress: buf.readUInt32LE(rsrcHeaderOffset + 12),
+				rawSize: buf.readUInt32LE(rsrcHeaderOffset + 16),
+				rawOffset: buf.readUInt32LE(rsrcHeaderOffset + 20),
+			}
+
+			const leaves: PeResourceLeaf[] = []
+			walkPeResourceDirectory(
+				buf,
+				[section],
+				section.rawOffset,
+				0,
+				0,
+				0,
+				undefined,
+				0,
+				undefined,
+				leaves,
+			)
+
+			expect(leaves.map((leaf) => leaf.typeId)).toEqual([3])
+			expect(leaves.map((leaf) => leaf.nameName)).toEqual(['EXISTING'])
+			expect(leaves.map((leaf) => leaf.language)).toEqual([0])
+			expect(leaves.map((leaf) => leaf.data.toString('ascii'))).toEqual(['EXISTDAT'])
 		})
 	})
 

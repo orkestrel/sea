@@ -26,9 +26,9 @@ import {
 	WINDOWS_SUBSYSTEM_GUI,
 } from '../constants.js'
 import {
+	buildBlobConfig,
+	buildSignCommand,
 	compressDirectory,
-	createBlobConfig,
-	createSignCommand,
 	ensureContained,
 	ensureExists,
 	ensureSafeKey,
@@ -38,18 +38,39 @@ import {
 	isCompressible,
 	isPEExecutable,
 	patchPESubsystem,
-	platformConfig,
+	resolvePlatform,
 	stripPESignature,
 	walkDirectory,
 } from '../helpers.js'
 import { SEAError } from '../errors.js'
 import { Injector } from '../injectors/Injector.js'
 
-// === SEA
-
+/**
+ * Runs a Node.js single executable application build to completion.
+ *
+ * @remarks
+ * `execute` compresses the configured directories, generates the SEA blob, copies
+ * the host Node binary, injects the blob with an {@link Injector}, signs the
+ * result where the platform supports it, and moves the finished executable into
+ * place atomically. Each stage reports on `emitter`, and every failure throws a
+ * coded `SEAError` after an `error` event carrying it.
+ *
+ * @param options - SEA build options: the output name, the entry point, the output
+ * directory, and the optional assets, compression, Windows, and blob settings
+ *
+ * @example
+ * ```ts
+ * const sea = new SEA({
+ *     name: 'myapp',
+ *     entry: { path: 'dist/server/serve.cjs' },
+ *     output: 'dist/sea',
+ * })
+ * const result = await sea.execute()
+ * sea.destroy()
+ * ```
+ */
 export class SEA implements SEAInterface {
 	#status: SEAStatus = 'idle'
-	#destroyed = false
 	readonly #options: SEAOptions
 	readonly #emitter: Emitter<SEAEventMap>
 
@@ -70,14 +91,14 @@ export class SEA implements SEAInterface {
 	}
 
 	async execute(): Promise<SEAResult> {
-		if (this.#destroyed) {
+		if (this.#emitter.destroyed) {
 			throw new SEAError('STATE', 'SEA is destroyed')
 		}
 		if (this.#status === 'active') {
 			throw new SEAError('STATE', 'SEA build already in progress')
 		}
 
-		const platform = platformConfig()
+		const platform = resolvePlatform()
 		if (platform === undefined) {
 			const error = new SEAError('PLATFORM', `Unsupported platform: ${process.platform}`, {
 				platform: process.platform,
@@ -128,8 +149,6 @@ export class SEA implements SEAInterface {
 	}
 
 	destroy(): void {
-		if (this.#destroyed) return
-		this.#destroyed = true
 		this.#emitter.destroy()
 	}
 
@@ -148,12 +167,10 @@ export class SEA implements SEAInterface {
 
 		for (const [key, path] of Object.entries(this.#options.assets ?? {})) {
 			ensureSafeKey(key)
-			ensureSafeKey(path)
 			ensureContained(base, path)
 		}
 
 		for (const path of this.#options.compression?.paths ?? []) {
-			ensureSafeKey(path)
 			// A compression path that does not exist yet is skipped by #compress
 			// (existsSync gate below), so validation only enforces containment
 			// for paths that actually exist — keep the two stages in agreement.
@@ -166,8 +183,8 @@ export class SEA implements SEAInterface {
 		if (sign !== undefined) {
 			// Trigger the file-XOR-thumbprint and timestamp-scheme validation
 			// fail-fast, before any build work runs. The placeholder target is
-			// never executed here — createSignCommand is a pure argv builder.
-			createSignCommand(sign, 'placeholder')
+			// never executed here — buildSignCommand is a pure argv builder.
+			buildSignCommand(sign, 'placeholder')
 
 			if (sign.file !== undefined) {
 				ensureExists(resolve(base, sign.file), 'Certificate file not found', 'SIGN')
@@ -231,7 +248,7 @@ export class SEA implements SEAInterface {
 
 		const configPath = join(output, 'sea-config.json')
 		const blob = join(output, 'sea-prep.blob')
-		const config = createBlobConfig(
+		const config = buildBlobConfig(
 			{
 				path: entry,
 				...(this.#options.entry.format === undefined ? {} : { format: this.#options.entry.format }),
@@ -264,7 +281,7 @@ export class SEA implements SEAInterface {
 		root: string,
 		blob: string,
 	): { executable: string; signed: boolean; stripped: boolean; terminal?: boolean } {
-		const platform = platformConfig()
+		const platform = resolvePlatform()
 		if (platform === undefined) {
 			throw new SEAError('PLATFORM', `Unsupported platform: ${process.platform}`, {
 				platform: process.platform,
@@ -362,12 +379,12 @@ export class SEA implements SEAInterface {
 				if (sign !== undefined) {
 					this.#check()
 					// Resolve the certificate file against the SAME base #validate
-					// checked existence against — createSignCommand's argv is passed
+					// checked existence against — buildSignCommand's argv is passed
 					// through executeShell without a cwd, so a relative sign.file would
 					// otherwise resolve against process.cwd(), a different file.
 					const signInput =
 						sign.file !== undefined ? { ...sign, file: resolve(root, sign.file) } : sign
-					const signArgs = createSignCommand(signInput, temp)
+					const signArgs = buildSignCommand(signInput, temp)
 					try {
 						executeShell(signArgs, shell)
 					} catch {

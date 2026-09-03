@@ -1,7 +1,7 @@
 // Server-test setup — node-only helpers, loaded after `setup.ts` for the node
 // `src:server` (and `guides`) projects. `node:fs` / `node:path` imports belong
 // here, never in `setup.ts`. Anchor every path to `WORKSPACE_ROOT` so the
-// runner's cwd never matters (AGENTS §16.1).
+// runner's cwd never matters.
 
 import type { InjectorOptions, SEAOptions } from '@src/server'
 import type { ScratchInterface } from '@orkestrel/test/server'
@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { resolveRoot } from '@orkestrel/test'
 import { createScratch, destroyScratch } from '@orkestrel/test/server'
 import {
+	alignELFNoteSize,
 	ELF_CLASS_64,
 	ELF_DATA_LSB,
 	ELF_PT_NOTE,
@@ -27,11 +28,11 @@ export const WORKSPACE_ROOT = fileURLToPath(resolveRoot(import.meta))
 /**
  * Run `fn` with a fresh {@link ScratchInterface} pre-populated with `files`,
  * then destroy it unconditionally — the shared allocate/use/destroy wrapper
- * every seal/injector test repeats (AGENTS §16.1). Allocated under the host
- * temp directory — NOT anchored under `WORKSPACE_ROOT`, since a seal build
- * writes a real executable that must never land in source control.
+ * every SEA/injector test repeats. Allocated under the host temp directory —
+ * NOT anchored under `WORKSPACE_ROOT`, because a SEA build writes a real
+ * executable that must never land in source control.
  *
- * Teardown goes through `destroyScratch` rather than `ScratchInterface.destroy` because a seal
+ * Teardown goes through `destroyScratch` rather than `ScratchInterface.destroy` because a SEA
  * build spawns shell commands rooted at the allocation, and a host holds that directory for a
  * short interval after the command that held it exits. `destroy` attempts removal exactly once
  * and throws on that hold; `destroyScratch` retries within a budget until the host lets go.
@@ -62,7 +63,7 @@ export async function withTestDir<T>(
  */
 export function createSEAOptions(overrides?: Partial<SEAOptions>): SEAOptions {
 	return {
-		name: 'seal-test',
+		name: 'sea-test',
 		entry: { path: 'entry.cjs' },
 		output: 'dist',
 		...overrides,
@@ -95,7 +96,7 @@ export function createInjectorOptions(options: {
 //
 // Synthetic executables containing exactly the fields the Injector parses —
 // enough to exercise real injection logic against real byte layouts, never
-// against real toolchain output (AGENTS §16.1: no network, deterministic).
+// against real toolchain output: no network, deterministic.
 
 /** Options for {@link buildPeFixture}. */
 export interface PeFixtureOptions {
@@ -302,7 +303,8 @@ export interface PeResourceLeaf {
 	readonly data: Buffer
 }
 
-interface PeSectionInfo {
+/** One PE section table entry, as {@link walkPeResourceDirectory} reads it. */
+export interface PeSectionInfo {
 	readonly name: string
 	readonly virtualAddress: number
 	readonly virtualSize: number
@@ -344,6 +346,112 @@ function rvaToFileOffsetPe(rva: number, sections: readonly PeSectionInfo[]): num
 }
 
 /**
+ * Reads one `IMAGE_RESOURCE_DIR_STRING_U` — a UTF-16LE string prefixed by its
+ * character count — from `offset`.
+ *
+ * @param buf - Buffer holding the PE image
+ * @param offset - Byte offset of the character count
+ * @returns The decoded string, empty when the count is zero
+ */
+export function readPeResourceString(buf: Buffer, offset: number): string {
+	const charCount = buf.readUInt16LE(offset)
+	return buf.subarray(offset + 2, offset + 2 + charCount * 2).toString('utf16le')
+}
+
+/**
+ * Walks one level of a PE resource directory tree, appending every leaf it reaches
+ * to `leaves` and recursing into each subdirectory.
+ *
+ * @param buf - Buffer holding the PE image
+ * @param sections - Section table used to convert a leaf's data RVA to a file offset
+ * @param sectionRawOffset - File offset of the resource section the tree lives in
+ * @param dirOffset - Offset of this directory, relative to `sectionRawOffset`
+ * @param depth - Tree level: 0 selects the type, 1 the name, 2 the language
+ * @param typeId - Type id inherited from the level above
+ * @param typeName - Type name inherited from the level above, when the entry was named
+ * @param nameId - Name id inherited from the level above
+ * @param nameName - Resource name inherited from the level above, when the entry was named
+ * @param leaves - Collection each reached leaf is appended to
+ */
+export function walkPeResourceDirectory(
+	buf: Buffer,
+	sections: readonly PeSectionInfo[],
+	sectionRawOffset: number,
+	dirOffset: number,
+	depth: number,
+	typeId: number,
+	typeName: string | undefined,
+	nameId: number,
+	nameName: string | undefined,
+	leaves: PeResourceLeaf[],
+): void {
+	const absOffset = sectionRawOffset + dirOffset
+	const numNamed = buf.readUInt16LE(absOffset + 12)
+	const numId = buf.readUInt16LE(absOffset + 14)
+	const total = numNamed + numId
+
+	for (let i = 0; i < total; i++) {
+		const entryOffset = absOffset + 16 + i * 8
+		const nameOrId = buf.readUInt32LE(entryOffset)
+		const offsetOrData = buf.readUInt32LE(entryOffset + 4)
+
+		let entryId = 0
+		let entryName: string | undefined
+		if ((nameOrId & 0x80000000) !== 0) {
+			entryName = readPeResourceString(buf, sectionRawOffset + (nameOrId & 0x7fffffff))
+		} else {
+			entryId = nameOrId
+		}
+
+		let nextTypeId = typeId
+		let nextTypeName = typeName
+		let nextNameId = nameId
+		let nextNameName = nameName
+		if (depth === 0) {
+			nextTypeId = entryId
+			nextTypeName = entryName
+		} else if (depth === 1) {
+			nextNameId = entryId
+			nextNameName = entryName
+		}
+
+		if ((offsetOrData & 0x80000000) !== 0) {
+			const subOffset = offsetOrData & 0x7fffffff
+			walkPeResourceDirectory(
+				buf,
+				sections,
+				sectionRawOffset,
+				subOffset,
+				depth + 1,
+				nextTypeId,
+				nextTypeName,
+				nextNameId,
+				nextNameName,
+				leaves,
+			)
+		} else {
+			const dataEntryOffset = sectionRawOffset + offsetOrData
+			const dataRva = buf.readUInt32LE(dataEntryOffset)
+			const dataSize = buf.readUInt32LE(dataEntryOffset + 4)
+			const codePage = buf.readUInt32LE(dataEntryOffset + 8)
+			const language = depth === 2 ? entryId : 0
+			const fileOffset = rvaToFileOffsetPe(dataRva, sections)
+			const data =
+				fileOffset >= 0 ? buf.subarray(fileOffset, fileOffset + dataSize) : Buffer.alloc(0)
+			leaves.push({
+				typeId: nextTypeId,
+				typeName: nextTypeName,
+				nameId: nextNameId,
+				nameName: nextNameName,
+				language,
+				codePage,
+				data,
+			})
+		}
+	}
+}
+
+/**
  * Re-parse a PE resource directory tree from a named section (e.g. the
  * Injector's `.rsrc2` output section) into a flat list of leaves, for
  * asserting on injected/preserved resource data after `inject()`.
@@ -354,76 +462,18 @@ export function parsePeResourceLeaves(buf: Buffer, sectionName: string): readonl
 	if (section === undefined) return []
 
 	const leaves: PeResourceLeaf[] = []
-
-	const readString = (offset: number): string => {
-		const charCount = buf.readUInt16LE(offset)
-		return buf.subarray(offset + 2, offset + 2 + charCount * 2).toString('utf16le')
-	}
-
-	const walk = (
-		dirOffset: number,
-		depth: number,
-		typeId: number,
-		typeName: string | undefined,
-		nameId: number,
-		nameName: string | undefined,
-	): void => {
-		const absOffset = section.rawOffset + dirOffset
-		const numNamed = buf.readUInt16LE(absOffset + 12)
-		const numId = buf.readUInt16LE(absOffset + 14)
-		const total = numNamed + numId
-
-		for (let i = 0; i < total; i++) {
-			const entryOffset = absOffset + 16 + i * 8
-			const nameOrId = buf.readUInt32LE(entryOffset)
-			const offsetOrData = buf.readUInt32LE(entryOffset + 4)
-
-			let entryId = 0
-			let entryName: string | undefined
-			if ((nameOrId & 0x80000000) !== 0) {
-				entryName = readString(section.rawOffset + (nameOrId & 0x7fffffff))
-			} else {
-				entryId = nameOrId
-			}
-
-			let nextTypeId = typeId
-			let nextTypeName = typeName
-			let nextNameId = nameId
-			let nextNameName = nameName
-			if (depth === 0) {
-				nextTypeId = entryId
-				nextTypeName = entryName
-			} else if (depth === 1) {
-				nextNameId = entryId
-				nextNameName = entryName
-			}
-
-			if ((offsetOrData & 0x80000000) !== 0) {
-				const subOffset = offsetOrData & 0x7fffffff
-				walk(subOffset, depth + 1, nextTypeId, nextTypeName, nextNameId, nextNameName)
-			} else {
-				const dataEntryOffset = section.rawOffset + offsetOrData
-				const dataRva = buf.readUInt32LE(dataEntryOffset)
-				const dataSize = buf.readUInt32LE(dataEntryOffset + 4)
-				const codePage = buf.readUInt32LE(dataEntryOffset + 8)
-				const language = depth === 2 ? entryId : 0
-				const fileOffset = rvaToFileOffsetPe(dataRva, sections)
-				const data =
-					fileOffset >= 0 ? buf.subarray(fileOffset, fileOffset + dataSize) : Buffer.alloc(0)
-				leaves.push({
-					typeId: nextTypeId,
-					typeName: nextTypeName,
-					nameId: nextNameId,
-					nameName: nextNameName,
-					language,
-					codePage,
-					data,
-				})
-			}
-		}
-	}
-
-	walk(0, 0, 0, undefined, 0, undefined)
+	walkPeResourceDirectory(
+		buf,
+		sections,
+		section.rawOffset,
+		0,
+		0,
+		0,
+		undefined,
+		0,
+		undefined,
+		leaves,
+	)
 	return leaves
 }
 
@@ -558,11 +608,6 @@ export interface ElfNote {
  * 4-byte-aligned descriptor), for asserting on injected ELF note content.
  */
 export function findElfNotes(buf: Buffer, namePrefix: string): readonly ElfNote[] {
-	const alignTo4 = (value: number): number => {
-		const remainder = value % 4
-		return remainder === 0 ? value : value + (4 - remainder)
-	}
-
 	const notes: ElfNote[] = []
 	for (const header of parseElfProgramHeaders(buf)) {
 		if (header.type !== ELF_PT_NOTE) continue
@@ -572,7 +617,7 @@ export function findElfNotes(buf: Buffer, namePrefix: string): readonly ElfNote[
 		const nameBuf = buf.subarray(header.offset + 12, header.offset + 12 + namesz)
 		const name = nameBuf.toString('utf-8').replace(/[^\x20-\x7e]+$/, '')
 		if (!name.startsWith(namePrefix)) continue
-		const descOffset = header.offset + 12 + alignTo4(namesz)
+		const descOffset = header.offset + 12 + alignELFNoteSize(namesz)
 		notes.push({ header, name, descsz, descriptor: buf.subarray(descOffset, descOffset + descsz) })
 	}
 	return notes

@@ -18,7 +18,7 @@ export const WINDOWS_SUBSYSTEM_CONSOLE = 3
 /** Names the file extension indicating Brotli compression */
 export const BROTLI_EXTENSION = '.br'
 
-/** Lists the file extensions that should NOT be Brotli-compressed */
+/** Lists the file extensions Brotli compression skips */
 export const SKIP_EXTENSIONS: ReadonlySet<string> = new Set([
 	'.br',
 	'.gz',
@@ -46,12 +46,6 @@ export const SKIP_EXTENSIONS: ReadonlySet<string> = new Set([
 /** Names the default SEA entry point module format when none is specified */
 export const DEFAULT_ENTRY_FORMAT: SEAEntryFormat = 'cjs'
 
-/** Names the asset key for the raw (uncompressed) client HTML entry */
-export const CLIENT_ASSET_KEY_RAW = 'client.html'
-
-/** Names the asset key for the Brotli-compressed client HTML entry */
-export const CLIENT_ASSET_KEY_BR = 'client.html.br'
-
 // === Binary Format Magic
 
 /** Holds the DOS MZ header magic (first 2 bytes of a PE file) */
@@ -77,6 +71,18 @@ export const ELF_DATA_LSB = 1
 
 /** Holds the ELF program header type for a note segment */
 export const ELF_PT_NOTE = 4
+
+/** Holds the ELF program header type for a loadable segment */
+export const ELF_PT_LOAD = 1
+
+/** Holds the ELF program header type for the program header table itself */
+export const ELF_PT_PHDR = 6
+
+/** Holds the ELF segment permission flag marking a segment readable */
+export const ELF_PF_R = 4
+
+/** Holds the page size an injected ELF segment is aligned to */
+export const ELF_PAGE_SIZE = 0x1000
 
 /** Holds the Mach-O 64-bit magic (little-endian) */
 export const MACHO_MAGIC_64 = 0xfeedfacf

@@ -1,6 +1,6 @@
 import type { SEAErrorCode } from './types.js'
 
-// Error surface for the seal build. `SEAError` is the coded base every
+// Error surface for the SEA build. `SEAError` is the coded base every
 // domain failure throws through, so a caller can branch on `code` rather
 // than parsing a message string. `ShellError` specializes it for the shell
 // boundary — `executeShell` maps a failed `executeSync` invocation to a
@@ -8,7 +8,7 @@ import type { SEAErrorCode } from './types.js'
 // the process output rather than parsing the thrown message.
 
 /**
- * Represents the coded base error for every failure raised by the seal build.
+ * Represents the coded base error for every failure raised by the SEA build.
  *
  * @remarks
  * Carries a machine-readable {@link SEAErrorCode} and optional `context`
@@ -17,7 +17,7 @@ import type { SEAErrorCode } from './types.js'
  * @example
  * ```ts
  * try {
- *     seal.execute()
+ *     sea.execute()
  * } catch (error) {
  *     if (isSEAError(error)) {
  *         console.error(error.code, error.context)

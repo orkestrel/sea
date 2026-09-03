@@ -1,6 +1,3 @@
-import { readFileSync, existsSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { getAssetKeys, getRawAsset, isSea } from 'node:sea'
 import type {
 	AssetInput,
 	AssetInterface,
@@ -9,20 +6,45 @@ import type {
 	AssetManagerOptions,
 } from '../types.js'
 import type { EmitterInterface } from '@orkestrel/emitter'
+import { readFileSync, existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { getAssetKeys, getRawAsset, isSea } from 'node:sea'
 import { Emitter } from '@orkestrel/emitter'
 import { isArrayBuffer } from '@orkestrel/contract'
-import { CLIENT_ASSET_KEY_BR, CLIENT_ASSET_KEY_RAW } from '../constants.js'
 import { Asset } from './Asset.js'
 
-// === AssetManager
-
+/**
+ * Collects named assets from a SEA blob or from disk and serves them by key.
+ *
+ * @remarks
+ * Construction registers every asset embedded in the running SEA blob, so an
+ * executable built by this package reaches its assets without touching the
+ * filesystem. Outside SEA mode that step registers nothing, and `load()` reads
+ * the paths `options.assets` configures instead.
+ *
+ * @param options - Asset manager options: the project root, the key→path mapping
+ * `load()` reads, and the event hooks
+ *
+ * @example
+ * ```ts
+ * const manager = new AssetManager({
+ *     root: process.cwd(),
+ *     assets: { 'client.html.br': 'dist/client/client.html.br' },
+ * })
+ * manager.load()
+ * manager.asset('client.html.br')
+ * manager.destroy()
+ * ```
+ */
 export class AssetManager implements AssetManagerInterface {
 	readonly #emitter: Emitter<AssetManagerEventMap>
 	#assets = new Map<string, AssetInterface>()
 	readonly #root: string
+	readonly #paths: Readonly<Record<string, string>>
 
 	constructor(options?: AssetManagerOptions) {
 		this.#root = options?.root ?? process.cwd()
+		this.#paths = options?.assets ?? {}
 		this.#emitter = new Emitter({
 			...(options?.on === undefined ? {} : { on: options.on }),
 			...(options?.error === undefined ? {} : { error: options.error }),
@@ -50,7 +72,7 @@ export class AssetManager implements AssetManagerInterface {
 		return [...this.#assets.keys()]
 	}
 
-	register(input: AssetInput | AssetInput[]): void {
+	register(input: AssetInput | readonly AssetInput[]): void {
 		const items = Array.isArray(input) ? input : [input]
 		for (const item of items) {
 			const asset: AssetInterface = new Asset(item)
@@ -62,43 +84,30 @@ export class AssetManager implements AssetManagerInterface {
 	load(): void {
 		if (isSea()) return
 
-		const devPath = resolve(this.#root, 'client', CLIENT_ASSET_KEY_RAW)
-		const builtBrPath = resolve(this.#root, 'dist', 'client', CLIENT_ASSET_KEY_BR)
-
-		if (existsSync(devPath)) {
-			try {
-				const raw = readFileSync(devPath, 'utf-8')
-				const encoder = new TextEncoder()
-				const bytes = encoder.encode(raw)
-				const content = bytes.buffer
-				if (!isArrayBuffer(content)) {
-					throw new Error('Failed to encode client asset')
-				}
-				this.register({ key: CLIENT_ASSET_KEY_RAW, content, compressed: false })
-				this.#emitter.emit('load', [CLIENT_ASSET_KEY_RAW])
-			} catch (thrown: unknown) {
-				this.#emitter.emit('error', thrown)
+		const registered: string[] = []
+		for (const [key, path] of Object.entries(this.#paths)) {
+			const resolved = resolve(this.#root, path)
+			if (!existsSync(resolved)) {
+				this.#emitter.emit('error', new Error(`Asset not found: ${path}`))
+				continue
 			}
-			return
-		}
-
-		if (existsSync(builtBrPath)) {
 			try {
-				const buffer = readFileSync(builtBrPath)
+				const buffer = readFileSync(resolved)
 				const bufferData = buffer.buffer
 				if (!isArrayBuffer(bufferData)) {
-					throw new Error('Failed to read client asset')
+					throw new Error(`Failed to read asset: ${path}`)
 				}
 				const content = bufferData.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
-				this.register({ key: CLIENT_ASSET_KEY_BR, content, compressed: true })
-				this.#emitter.emit('load', [CLIENT_ASSET_KEY_BR])
+				this.register({ key, content })
+				registered.push(key)
 			} catch (thrown: unknown) {
 				this.#emitter.emit('error', thrown)
 			}
-			return
 		}
 
-		this.#emitter.emit('error', new Error('Client assets not found'))
+		if (registered.length > 0) {
+			this.#emitter.emit('load', registered)
+		}
 	}
 
 	clear(): void {

@@ -7,14 +7,14 @@ import { createInjectorOptions, createSEAOptions, withTestDir } from '../../setu
 describe('factories', () => {
 	describe('createSEA', () => {
 		it('constructs a working SEAInterface without throwing', () => {
-			const seal = createSEA(createSEAOptions())
+			const sea = createSEA(createSEAOptions())
 
-			expect(seal.status).toBe('idle')
-			expect(seal.emitter).toBeDefined()
-			expect(typeof seal.execute).toBe('function')
-			expect(typeof seal.destroy).toBe('function')
+			expect(sea.status).toBe('idle')
+			expect(sea.emitter).toBeDefined()
+			expect(typeof sea.execute).toBe('function')
+			expect(typeof sea.destroy).toBe('function')
 
-			seal.destroy()
+			sea.destroy()
 		})
 	})
 

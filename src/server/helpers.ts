@@ -1,9 +1,9 @@
 import type {
 	ELFNoteHeader,
 	SEABlobOptions,
+	SEABrotliOptions,
 	SEACompressionHandler,
 	SEACompressionManifest,
-	SEACompressionOptions,
 	SEACompressionResult,
 	SEACompressionSize,
 	SEAEntryOptions,
@@ -46,12 +46,12 @@ import { SEAError, ShellError } from './errors.js'
 // === Platform Helpers
 
 /**
- * Gets the platform configuration for the current OS.
+ * Resolves the effective platform configuration.
  *
  * @param platform - Platform identifier. Default: `process.platform`.
  * @returns Platform configuration, or undefined if unsupported
  */
-export function platformConfig(platform?: string): SEAPlatform | undefined {
+export function resolvePlatform(platform?: string): SEAPlatform | undefined {
 	return SEA_PLATFORMS[platform ?? process.platform]
 }
 
@@ -73,6 +73,7 @@ export function isPlatformSupported(platform?: string): boolean {
  * @param path - Absolute or relative path to check
  * @param message - Error message when path is missing
  * @param code - Error code to throw with. Default: `'STATE'`.
+ * @throws SEAError with `code` (default `'STATE'`) when `path` does not exist
  */
 export function ensureExists(path: string, message: string, code?: SEAErrorCode): void {
 	if (!existsSync(path)) {
@@ -81,7 +82,8 @@ export function ensureExists(path: string, message: string, code?: SEAErrorCode)
 }
 
 /**
- * Checks if a file should be Brotli-compressed based on its extension.
+ * Checks whether a file's extension is outside `SKIP_EXTENSIONS`, so Brotli
+ * compression applies to it.
  *
  * @param path - Path to the file
  * @returns True if the file type benefits from compression; false otherwise
@@ -211,13 +213,14 @@ export function computeSize(original: number, compressed: number): SEACompressio
  *
  * @param input - Absolute path to the source file
  * @param output - Absolute path for the compressed output
- * @param options - Compression options (quality, mode)
+ * @param options - Brotli options (quality, mode)
  * @returns Compression result with size comparison
+ * @throws SEAError with code `'OUTPUT'` when `output` is an existing symlink
  */
 export function compressFile(
 	input: string,
 	output: string,
-	options?: SEACompressionOptions,
+	options?: SEABrotliOptions,
 ): SEACompressionResult {
 	const quality = options?.quality ?? DEFAULT_SEA_COMPRESSION_QUALITY
 	const mode = SEA_COMPRESSION_MODE_VALUES[options?.mode ?? 'generic']
@@ -258,13 +261,13 @@ export function compressFile(
  * Compresses all compressible files in a directory tree.
  *
  * @param directory - Absolute path to the directory
- * @param options - Compression options
+ * @param options - Brotli options (quality, mode)
  * @param progress - Optional callback invoked after each file is compressed
  * @returns Compression manifest with all results
  */
 export function compressDirectory(
 	directory: string,
-	options?: SEACompressionOptions,
+	options?: SEABrotliOptions,
 	progress?: SEACompressionHandler,
 ): SEACompressionManifest {
 	const files = walkDirectory(directory)
@@ -323,6 +326,7 @@ export function alignTo(value: number, alignment: number): number {
  * @param fd - Open file descriptor
  * @param offset - Byte offset to read from
  * @returns The 32-bit value
+ * @throws SEAError with code `'FORMAT'` when fewer than four bytes are readable at `offset`
  *
  * @example
  * ```ts
@@ -332,7 +336,10 @@ export function alignTo(value: number, alignment: number): number {
  */
 export function readU32(fd: number, offset: number): number {
 	const buf = Buffer.alloc(4)
-	readSync(fd, buf, 0, 4, offset)
+	const read = readSync(fd, buf, 0, 4, offset)
+	if (read < 4) {
+		throw new SEAError('FORMAT', 'Short read', { offset, expected: 4, read })
+	}
 	return buf.readUInt32LE(0)
 }
 
@@ -342,6 +349,7 @@ export function readU32(fd: number, offset: number): number {
  * @param fd - Open file descriptor
  * @param offset - Byte offset to read from
  * @returns The 64-bit value, as a `bigint`
+ * @throws SEAError with code `'FORMAT'` when fewer than eight bytes are readable at `offset`
  *
  * @example
  * ```ts
@@ -351,7 +359,10 @@ export function readU32(fd: number, offset: number): number {
  */
 export function readU64(fd: number, offset: number): bigint {
 	const buf = Buffer.alloc(8)
-	readSync(fd, buf, 0, 8, offset)
+	const read = readSync(fd, buf, 0, 8, offset)
+	if (read < 8) {
+		throw new SEAError('FORMAT', 'Short read', { offset, expected: 8, read })
+	}
 	return buf.readBigUInt64LE(0)
 }
 
@@ -471,10 +482,14 @@ export function isPowerOfTwo(value: number): boolean {
  *
  * @param fd - Open file descriptor
  * @returns The offset to the PE signature
+ * @throws SEAError with code `'FORMAT'` when fewer than four bytes are readable at `0x3c`
  */
 export function readPEOffset(fd: number): number {
 	const buf = Buffer.alloc(4)
-	readSync(fd, buf, 0, 4, 0x3c)
+	const read = readSync(fd, buf, 0, 4, 0x3c)
+	if (read < 4) {
+		throw new SEAError('FORMAT', 'Short read', { offset: 0x3c, expected: 4, read })
+	}
 	return buf.readUInt32LE(0)
 }
 
@@ -484,10 +499,14 @@ export function readPEOffset(fd: number): number {
  * @param fd - Open file descriptor
  * @param offset - Byte offset to read from
  * @returns The 16-bit value
+ * @throws SEAError with code `'FORMAT'` when fewer than two bytes are readable at `offset`
  */
 export function readU16(fd: number, offset: number): number {
 	const buf = Buffer.alloc(2)
-	readSync(fd, buf, 0, 2, offset)
+	const read = readSync(fd, buf, 0, 2, offset)
+	if (read < 2) {
+		throw new SEAError('FORMAT', 'Short read', { offset, expected: 2, read })
+	}
 	return buf.readUInt16LE(0)
 }
 
@@ -613,11 +632,11 @@ export function stripPESignature(path: string): void {
  *
  * @example
  * ```ts
- * createSignCommand({ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' }, 'dist/sea/app.exe')
+ * buildSignCommand({ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' }, 'dist/sea/app.exe')
  * // ['signtool', 'sign', '/fd', 'sha256', '/sha1', 'AABBCCDDEEFF00112233445566778899AABBCCDD', 'dist/sea/app.exe']
  * ```
  */
-export function createSignCommand(sign: SEAWindowsSignOptions, target: string): readonly string[] {
+export function buildSignCommand(sign: SEAWindowsSignOptions, target: string): readonly string[] {
 	const hasFile = sign.file !== undefined
 	const hasThumbprint = sign.thumbprint !== undefined
 
@@ -915,10 +934,10 @@ export function finalizeExecutable(source: string, target: string): void {
  *
  * @example
  * ```ts
- * const config = createBlobConfig({ path: 'dist/bin/serve.cjs' }, 'dist/bin/sea-prep.blob', undefined)
+ * const config = buildBlobConfig({ path: 'dist/bin/serve.cjs' }, 'dist/bin/sea-prep.blob', undefined)
  * ```
  */
-export function createBlobConfig(
+export function buildBlobConfig(
 	entry: SEAEntryOptions,
 	blob: string,
 	assets: Readonly<Record<string, string>> | undefined,
@@ -1066,6 +1085,9 @@ export function copyRange(
  *
  * @param executable - Absolute path to the executable
  * @param fuse - Sentinel fuse string (without the `:0` suffix)
+ * @throws SEAError with code `'FUSE'` when the fuse value cannot be read
+ * @throws SEAError with code `'FUSE'` when the fuse carries a value other than `:0` or `:1`
+ * @throws SEAError with code `'FUSE'` when the fuse is not found in the executable
  */
 export function patchSentinelFuse(executable: string, fuse: string): void {
 	const fd = openSync(executable, 'r+')

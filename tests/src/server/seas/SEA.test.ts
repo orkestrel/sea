@@ -1,50 +1,66 @@
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { isSEAError, SEA } from '@src/server'
+import { createRecorder } from '@orkestrel/test'
 import { createSEAOptions, withTestDir } from '../../../setupServer.js'
 
 describe('SEA', () => {
 	it('starts with idle status', () => {
-		const seal = new SEA(createSEAOptions())
+		const sea = new SEA(createSEAOptions())
 
-		expect(seal.status).toBe('idle')
-		seal.destroy()
+		expect(sea.status).toBe('idle')
+		sea.destroy()
 	})
 
 	it('emits error events for build failures', async () => {
 		await withTestDir({}, async (scratch) => {
-			const errors: unknown[] = []
-			const onError = (error: unknown): void => {
-				errors.push(error)
-			}
-			const seal = new SEA(
+			const recorder = createRecorder<[unknown]>()
+			const sea = new SEA(
 				createSEAOptions({
 					root: scratch.path,
 					entry: { path: 'missing.cjs' },
 				}),
 			)
 
-			seal.emitter.on('error', onError)
+			sea.emitter.on('error', recorder.handler)
 
-			const error: unknown = await seal.execute().then(
+			const error: unknown = await sea.execute().then(
 				() => undefined,
 				(thrown: unknown) => thrown,
 			)
 			expect(isSEAError(error)).toBe(true)
 			expect(isSEAError(error) && error.code).toBe('ENTRY')
-			expect(seal.status).toBe('error')
-			expect(errors).toHaveLength(1)
+			expect(sea.status).toBe('error')
+			expect(recorder.count).toBe(1)
 
-			seal.emitter.off('error', onError)
-			seal.destroy()
+			sea.emitter.off('error', recorder.handler)
+			sea.destroy()
 		})
 	})
 
 	it('rejects execute() with code STATE once destroyed', async () => {
-		const seal = new SEA(createSEAOptions())
-		seal.destroy()
+		const sea = new SEA(createSEAOptions())
+		sea.destroy()
+		// The emitter carries the destroyed fact, and `destroy` stays idempotent.
+		sea.destroy()
 
-		const error: unknown = await seal.execute().then(
+		expect(sea.emitter.destroyed).toBe(true)
+
+		const error: unknown = await sea.execute().then(
+			() => undefined,
+			(thrown: unknown) => thrown,
+		)
+		expect(isSEAError(error)).toBe(true)
+		expect(isSEAError(error) && error.code).toBe('STATE')
+	})
+
+	it('rejects execute() with code STATE after a consumer destroys sea.emitter directly', async () => {
+		const sea = new SEA(createSEAOptions())
+		sea.emitter.destroy()
+
+		expect(sea.emitter.destroyed).toBe(true)
+
+		const error: unknown = await sea.execute().then(
 			() => undefined,
 			(thrown: unknown) => thrown,
 		)
@@ -55,30 +71,30 @@ describe('SEA', () => {
 	it('rejects a pre-aborted signal before any work runs', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
 				const controller = new AbortController()
 				controller.abort()
 
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						signal: controller.signal,
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
 				expect(isSEAError(error)).toBe(true)
 				expect(isSEAError(error) && error.code).toBe('ABORT')
 
-				expect(seal.status).toBe('error')
+				expect(sea.status).toBe('error')
 				expect(scratch.has('dist')).toBe(false)
 
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	})
@@ -86,21 +102,21 @@ describe('SEA', () => {
 	it('completes spawned shell commands within a generous timeout', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						timeout: 30_000,
 					}),
 				)
 
-				const result = await seal.execute()
+				const result = await sea.execute()
 
 				expect(result.size).toBeGreaterThan(0)
-				expect(seal.status).toBe('done')
-				seal.destroy()
+				expect(sea.status).toBe('done')
+				sea.destroy()
 			},
 		)
 	}, 30_000)
@@ -108,24 +124,24 @@ describe('SEA', () => {
 	it('surfaces TIMEOUT when a spawned shell command exceeds its timeout', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						timeout: 1,
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
 
 				expect(isSEAError(error) && error.code).toBe('TIMEOUT')
-				expect(seal.status).toBe('error')
-				seal.destroy()
+				expect(sea.status).toBe('error')
+				sea.destroy()
 			},
 		)
 	}, 30_000)
@@ -133,16 +149,16 @@ describe('SEA', () => {
 	it('aborts mid-pipeline without touching an existing output', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
 				const controller = new AbortController()
 				scratch.ensure('dist')
-				const name = process.platform === 'win32' ? 'seal-test.exe' : 'seal-test'
+				const name = process.platform === 'win32' ? 'sea-test.exe' : 'sea-test'
 				const sentinel = 'sentinel-bytes'
 				scratch.write(`dist/${name}`, sentinel)
 
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						signal: controller.signal,
@@ -154,7 +170,7 @@ describe('SEA', () => {
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
@@ -165,7 +181,7 @@ describe('SEA', () => {
 				const remaining = scratch.names('dist').filter((entry) => entry.includes('.tmp'))
 				expect(remaining).toHaveLength(0)
 
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	})
@@ -173,11 +189,11 @@ describe('SEA', () => {
 	it('rejects a traversal asset key with code ASSET before any compress event fires', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
 				const events: string[] = []
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						assets: { '../evil': 'entry.cjs' },
@@ -189,7 +205,7 @@ describe('SEA', () => {
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
@@ -197,7 +213,7 @@ describe('SEA', () => {
 				expect(isSEAError(error) && error.code).toBe('ASSET')
 
 				expect(events).toHaveLength(0)
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	})
@@ -205,11 +221,11 @@ describe('SEA', () => {
 	it('rejects a traversal compression path with code ASSET before any compress event fires', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
 				const events: string[] = []
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						compression: { paths: ['../..'] },
@@ -221,7 +237,7 @@ describe('SEA', () => {
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
@@ -229,7 +245,33 @@ describe('SEA', () => {
 				expect(isSEAError(error) && error.code).toBe('ASSET')
 
 				expect(events).toHaveLength(0)
-				seal.destroy()
+				sea.destroy()
+			},
+		)
+	})
+
+	it('accepts an absolute asset path that resolves inside the build root', async () => {
+		await withTestDir(
+			{
+				'assets/client.html': '<main>client</main>',
+			},
+			async (scratch) => {
+				const sea = new SEA(
+					createSEAOptions({
+						root: scratch.path,
+						assets: { 'client.html': join(scratch.path, 'assets', 'client.html') },
+					}),
+				)
+
+				const error: unknown = await sea.execute().then(
+					() => undefined,
+					(thrown: unknown) => thrown,
+				)
+				// The asset-key guard governs the key alone, so an absolute path reaches
+				// containment and the build fails on the missing entry point instead.
+				expect(isSEAError(error) && error.code).toBe('ENTRY')
+
+				sea.destroy()
 			},
 		)
 	})
@@ -237,7 +279,7 @@ describe('SEA', () => {
 	it('rejects an asset path that symlink-escapes root with code ASSET', async (context) => {
 		await withTestDir(
 			{
-				'root/entry.cjs': "console.log('hello from seal')\n",
+				'root/entry.cjs': "console.log('hello from sea')\n",
 				'outside/secret.txt': 'secret',
 			},
 			async (scratch) => {
@@ -253,7 +295,7 @@ describe('SEA', () => {
 				}
 
 				const events: string[] = []
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root,
 						assets: { escaped: 'escaped' },
@@ -265,7 +307,7 @@ describe('SEA', () => {
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
@@ -273,7 +315,7 @@ describe('SEA', () => {
 				expect(isSEAError(error) && error.code).toBe('ASSET')
 
 				expect(events).toHaveLength(0)
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	})
@@ -281,11 +323,11 @@ describe('SEA', () => {
 	it('rejects an unsafe executable name with code ASSET before any compress event fires', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
 				const events: string[] = []
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						name: '../evil',
@@ -297,7 +339,7 @@ describe('SEA', () => {
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
@@ -305,7 +347,7 @@ describe('SEA', () => {
 				expect(isSEAError(error) && error.code).toBe('ASSET')
 
 				expect(events).toHaveLength(0)
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	})
@@ -319,7 +361,7 @@ describe('SEA', () => {
 			},
 			async (scratch) => {
 				const progress: Array<{ current: number; total: number }> = []
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						entry: { path: 'missing-entry.cjs' },
@@ -334,8 +376,8 @@ describe('SEA', () => {
 
 				// #compress emits progress for every compressible file BEFORE #blob's
 				// ensureExists(entry) rejects with ENTRY — no real build, no node
-				// subprocess, no binary copy (AGENTS §16: fast + deterministic).
-				const error: unknown = await seal.execute().then(
+				// subprocess, no binary copy: fast and deterministic.
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
@@ -347,28 +389,28 @@ describe('SEA', () => {
 				expect(progress.every((event) => event.total === 2)).toBe(true)
 				expect(progress.map((event) => event.current)).toEqual([1, 2])
 
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	})
 
 	it('destroys its emitter', () => {
-		const seal = new SEA(createSEAOptions())
+		const sea = new SEA(createSEAOptions())
 
-		seal.destroy()
+		sea.destroy()
 
-		expect(seal.emitter.destroyed).toBe(true)
+		expect(sea.emitter.destroyed).toBe(true)
 	})
 
 	describe('windows.sign validation', () => {
 		it('rejects a sign config with neither file nor thumbprint, code SIGN, before any compress event fires', async () => {
 			await withTestDir(
 				{
-					'entry.cjs': "console.log('hello from seal')\n",
+					'entry.cjs': "console.log('hello from sea')\n",
 				},
 				async (scratch) => {
 					const events: string[] = []
-					const seal = new SEA(
+					const sea = new SEA(
 						createSEAOptions({
 							root: scratch.path,
 							windows: { sign: {} },
@@ -380,7 +422,7 @@ describe('SEA', () => {
 						}),
 					)
 
-					const error: unknown = await seal.execute().then(
+					const error: unknown = await sea.execute().then(
 						() => undefined,
 						(thrown: unknown) => thrown,
 					)
@@ -388,7 +430,7 @@ describe('SEA', () => {
 					expect(isSEAError(error) && error.code).toBe('SIGN')
 
 					expect(events).toHaveLength(0)
-					seal.destroy()
+					sea.destroy()
 				},
 			)
 		})
@@ -396,12 +438,12 @@ describe('SEA', () => {
 		it('rejects a sign config with both file and thumbprint, code SIGN, before any compress event fires', async () => {
 			await withTestDir(
 				{
-					'entry.cjs': "console.log('hello from seal')\n",
+					'entry.cjs': "console.log('hello from sea')\n",
 					'cert.pfx': 'not-a-real-cert',
 				},
 				async (scratch) => {
 					const events: string[] = []
-					const seal = new SEA(
+					const sea = new SEA(
 						createSEAOptions({
 							root: scratch.path,
 							windows: {
@@ -418,7 +460,7 @@ describe('SEA', () => {
 						}),
 					)
 
-					const error: unknown = await seal.execute().then(
+					const error: unknown = await sea.execute().then(
 						() => undefined,
 						(thrown: unknown) => thrown,
 					)
@@ -426,7 +468,7 @@ describe('SEA', () => {
 					expect(isSEAError(error) && error.code).toBe('SIGN')
 
 					expect(events).toHaveLength(0)
-					seal.destroy()
+					sea.destroy()
 				},
 			)
 		})
@@ -434,12 +476,12 @@ describe('SEA', () => {
 		it('rejects a non-http(s) timestamp, code SIGN, before any compress event fires', async () => {
 			await withTestDir(
 				{
-					'entry.cjs': "console.log('hello from seal')\n",
+					'entry.cjs': "console.log('hello from sea')\n",
 					'cert.pfx': 'not-a-real-cert',
 				},
 				async (scratch) => {
 					const events: string[] = []
-					const seal = new SEA(
+					const sea = new SEA(
 						createSEAOptions({
 							root: scratch.path,
 							windows: {
@@ -453,7 +495,7 @@ describe('SEA', () => {
 						}),
 					)
 
-					const error: unknown = await seal.execute().then(
+					const error: unknown = await sea.execute().then(
 						() => undefined,
 						(thrown: unknown) => thrown,
 					)
@@ -461,7 +503,7 @@ describe('SEA', () => {
 					expect(isSEAError(error) && error.code).toBe('SIGN')
 
 					expect(events).toHaveLength(0)
-					seal.destroy()
+					sea.destroy()
 				},
 			)
 		})
@@ -469,11 +511,11 @@ describe('SEA', () => {
 		it('rejects a missing certificate file, code SIGN, before any compress event fires', async () => {
 			await withTestDir(
 				{
-					'entry.cjs': "console.log('hello from seal')\n",
+					'entry.cjs': "console.log('hello from sea')\n",
 				},
 				async (scratch) => {
 					const events: string[] = []
-					const seal = new SEA(
+					const sea = new SEA(
 						createSEAOptions({
 							root: scratch.path,
 							windows: { sign: { file: 'missing-cert.pfx' } },
@@ -485,7 +527,7 @@ describe('SEA', () => {
 						}),
 					)
 
-					const error: unknown = await seal.execute().then(
+					const error: unknown = await sea.execute().then(
 						() => undefined,
 						(thrown: unknown) => thrown,
 					)
@@ -493,7 +535,7 @@ describe('SEA', () => {
 					expect(isSEAError(error) && error.code).toBe('SIGN')
 
 					expect(events).toHaveLength(0)
-					seal.destroy()
+					sea.destroy()
 				},
 			)
 		})

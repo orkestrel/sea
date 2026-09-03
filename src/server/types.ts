@@ -66,17 +66,25 @@ export interface SEAProgress {
 export type SEACompressionHandler = (result: SEACompressionResult) => void
 
 /**
- * Controls Brotli compression of one or more directories.
+ * Controls how Brotli encodes one file.
  *
  * @remarks
- * `paths`   — directories (relative to `SEAOptions.root`) to compress.
  * `mode`    — Brotli mode. Default: `'generic'`.
  * `quality` — Brotli quality level (0–11). Default: 11.
  */
-export interface SEACompressionOptions {
-	readonly paths: readonly string[]
+export interface SEABrotliOptions {
 	readonly mode?: SEACompressionMode
 	readonly quality?: number
+}
+
+/**
+ * Controls Brotli compression of one or more directories.
+ *
+ * @remarks
+ * `paths` — directories (relative to `SEAOptions.root`) to compress.
+ */
+export interface SEACompressionOptions extends SEABrotliOptions {
+	readonly paths: readonly string[]
 }
 
 // === Platform
@@ -129,6 +137,87 @@ export type ExecutableFormat = 'pe' | 'elf' | 'macho'
 export interface ELFNoteHeader {
 	readonly header: Buffer
 	readonly total: number
+}
+
+/**
+ * Holds one ELF64 program header entry.
+ *
+ * @remarks
+ * Transliterates the `Elf64_Phdr` structure of the ELF64 specification field for
+ * field, with the `p_` prefix dropped: `type` is `p_type`, `flags` is `p_flags`,
+ * `offset` is `p_offset`, `vaddr` is `p_vaddr`, `paddr` is `p_paddr`, `filesz` is
+ * `p_filesz`, `memsz` is `p_memsz`, and `align` is `p_align`. Every 64-bit field is
+ * carried as a `number` because an executable's offsets stay far inside the safe
+ * integer range.
+ */
+export interface ELFProgramHeader {
+	readonly type: number
+	readonly flags: number
+	readonly offset: number
+	readonly vaddr: number
+	readonly paddr: number
+	readonly filesz: number
+	readonly memsz: number
+	readonly align: number
+}
+
+/**
+ * Holds one leaf of a PE resource directory tree.
+ *
+ * @remarks
+ * Flattens the path a resource takes through the three directory levels of the PE
+ * `IMAGE_RESOURCE_DIRECTORY` tree — type, name, language — onto the
+ * `IMAGE_RESOURCE_DATA_ENTRY` it ends at. A level identifies its entry either by
+ * integer id or by name, so `typeId` and `nameId` carry the integer form and
+ * `typeName` and `nameName` the named form, whichever the entry used. `dataRVA` and
+ * `dataSize` are the data entry's `OffsetToData` and `Size` fields.
+ */
+export interface PEResourceLeaf {
+	readonly typeId: number
+	readonly typeName: string | undefined
+	readonly nameId: number
+	readonly nameName: string | undefined
+	readonly language: number
+	readonly codePage: number
+	readonly dataRVA: number
+	readonly dataSize: number
+}
+
+/**
+ * Holds one language entry of a PE resource name directory.
+ *
+ * @remarks
+ * `leafIndex` addresses the {@link PEResourceLeaf} this entry's bytes come from,
+ * within the leaf list the injector gathered from the original executable. A
+ * `leafIndex` of `-1` marks the entry the injector is adding, whose bytes are
+ * streamed from the blob file rather than copied from an existing leaf.
+ */
+export interface PEResourceEntry {
+	readonly language: number
+	readonly codePage: number
+	readonly leafIndex: number
+	readonly dataSize: number
+}
+
+/**
+ * Holds one PE section table entry.
+ *
+ * @remarks
+ * Transliterates the PE `IMAGE_SECTION_HEADER` structure: `name` is `Name` with its
+ * NUL padding stripped, `virtualSize` is `Misc.VirtualSize`, `virtualAddress` is
+ * `VirtualAddress`, `rawSize` is `SizeOfRawData`, `rawOffset` is
+ * `PointerToRawData`, and `characteristics` is `Characteristics`. `headerOffset` is
+ * not a header field: it records the file offset the entry was read from, so a
+ * later write lands on the same bytes.
+ */
+export interface PESection {
+	readonly name: string
+	readonly virtualSize: number
+	readonly virtualAddress: number
+	readonly rawSize: number
+	readonly rawOffset: number
+	readonly characteristics: number
+	readonly headerOffset: number
 }
 
 /**
@@ -213,12 +302,16 @@ export type AssetManagerEventMap = {
  * Configures the creation of an {@link AssetManagerInterface}.
  *
  * @remarks
- * `root` — project root used to resolve on-disk client assets. Default: `process.cwd()`.
+ * `root`   — project root used to resolve the configured `assets` paths. Default: `process.cwd()`.
+ * `assets` — key→path mapping for the assets `load()` reads from disk. Each path is
+ * relative to `root`. `load()` registers every path that exists under its key and
+ * emits one `error` for each configured path that is missing.
  */
 export interface AssetManagerOptions {
 	readonly on?: EmitterHooks<AssetManagerEventMap>
 	readonly error?: EmitterErrorHandler
 	readonly root?: string
+	readonly assets?: Readonly<Record<string, string>>
 }
 
 /**
@@ -226,7 +319,7 @@ export interface AssetManagerOptions {
  *
  * @remarks
  * In SEA mode, embedded assets are loaded automatically at construction.
- * Outside SEA, `load()` reads client assets from disk.
+ * Outside SEA, `load()` reads the paths `assets` configures from disk.
  */
 export interface AssetManagerInterface {
 	readonly emitter: EmitterInterface<AssetManagerEventMap>
@@ -234,7 +327,7 @@ export interface AssetManagerInterface {
 	asset(key: string): AssetInterface | undefined
 	assets(): readonly AssetInterface[]
 	keys(): readonly string[]
-	register(input: AssetInput | AssetInput[]): void
+	register(input: AssetInput | readonly AssetInput[]): void
 	load(): void
 	clear(): void
 	destroy(): void
@@ -243,7 +336,7 @@ export interface AssetManagerInterface {
 // === SEA
 
 /**
- * Names the overall status of the seal build.
+ * Names the overall status of the SEA build.
  */
 export type SEAStatus = 'idle' | 'active' | 'done' | 'error'
 
@@ -370,7 +463,7 @@ export interface SEAOptions {
  * `sign`      — Authenticode signing options. When present, the assembled
  * executable is signed with `signtool` (and verified) as the LAST content
  * mutation before the atomic finalize; when absent, the output is unsigned
- * and `SEAResult.signed` is `false` (unchanged default behavior).
+ * and `SEAResult.signed` is `false`.
  *
  * These options apply only when the build HOST is Windows — there is no
  * cross-compilation, so building on a non-Windows host ignores `windows.*`.
@@ -407,7 +500,7 @@ export interface SEAWindowsSignOptions {
 }
 
 /**
- * Represents the result of a successful seal build.
+ * Represents the result of a successful SEA build.
  *
  * @remarks
  * `executable`  — absolute path to the output binary.

@@ -8,7 +8,7 @@ import type {
 	SEAInterface,
 	SEAOptions,
 } from './types.js'
-import { SEA } from './seals/SEA.js'
+import { SEA } from './seas/SEA.js'
 import { Injector } from './injectors/Injector.js'
 import { Asset } from './assets/Asset.js'
 import { AssetManager } from './assets/AssetManager.js'
@@ -21,14 +21,14 @@ import { AssetManager } from './assets/AssetManager.js'
  *
  * @example
  * ```ts
- * const seal = createSEA({
+ * const sea = createSEA({
  *     name: 'orkestrel',
  *     entry: { path: 'dist/bin/serve.cjs' },
  *     output: 'dist/sea',
  *     assets: { 'index.html.br': 'dist/client/index.html.br' },
  *     compression: { paths: ['dist/client'] },
  * })
- * const result = await seal.execute()
+ * const result = await sea.execute()
  * ```
  */
 export function createSEA(options: SEAOptions): SEAInterface {

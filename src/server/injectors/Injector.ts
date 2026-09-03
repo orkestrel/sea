@@ -1,11 +1,12 @@
-/**
- * Names the injection strategy per executable format:
- * PE  — adds an RT_RCDATA resource via resource directory rebuild.
- * ELF — appends a PT_NOTE segment with the blob as note data.
- * Mach-O — appends an LC_SEGMENT_64 load command with a section.
- */
-
-import type { ExecutableFormat, InjectorInterface, InjectorOptions } from '../types.js'
+import type {
+	ELFProgramHeader,
+	ExecutableFormat,
+	InjectorInterface,
+	InjectorOptions,
+	PEResourceEntry,
+	PEResourceLeaf,
+	PESection,
+} from '../types.js'
 import {
 	openSync,
 	readSync,
@@ -37,6 +38,10 @@ import {
 	ELF_CLASS_64,
 	ELF_DATA_LSB,
 	ELF_PT_NOTE,
+	ELF_PT_LOAD,
+	ELF_PT_PHDR,
+	ELF_PF_R,
+	ELF_PAGE_SIZE,
 	MACHO_MAGIC_64,
 	MACHO_LC_SEGMENT_64,
 } from '../constants.js'
@@ -58,8 +63,32 @@ import {
 } from '../helpers.js'
 import { SEAError } from '../errors.js'
 
-// === Injector
-
+/**
+ * Writes a named resource into a PE, ELF, or Mach-O executable in place.
+ *
+ * @remarks
+ * The format is detected from the file's magic bytes at construction, and each
+ * format takes its own strategy: PE adds an `RT_RCDATA` resource by rebuilding the
+ * resource directory, ELF appends a `PT_NOTE` segment carrying the blob as note
+ * data, and Mach-O appends an `LC_SEGMENT_64` load command with one section. The
+ * blob is streamed from disk in every case, so its size is bounded by the
+ * filesystem rather than by memory.
+ *
+ * @param options - Injector options: the target executable, the resource name, the
+ * blob path, and the optional sentinel fuse and Mach-O segment
+ *
+ * @example
+ * ```ts
+ * const injector = new Injector({
+ *     executable: 'dist/sea/myapp.exe',
+ *     resource: 'NODE_SEA_BLOB',
+ *     blob: 'dist/sea/sea-prep.blob',
+ *     fuse: 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2',
+ * })
+ * injector.format // 'pe' | 'elf' | 'macho'
+ * injector.inject()
+ * ```
+ */
 export class Injector implements InjectorInterface {
 	#options: InjectorOptions
 	#format: ExecutableFormat
@@ -208,15 +237,7 @@ export class Injector implements InjectorInterface {
 			const sectionTableOffset = optionalOffset + optionalHeaderSize
 
 			// Collect all sections and find the resource section
-			const sections: Array<{
-				name: string
-				virtualSize: number
-				virtualAddress: number
-				rawSize: number
-				rawOffset: number
-				characteristics: number
-				headerOffset: number
-			}> = []
+			const sections: PESection[] = []
 
 			let rsrcSectionIndex = -1
 
@@ -270,16 +291,7 @@ export class Injector implements InjectorInterface {
 			}
 
 			// --- Gather existing resource leaves ---
-			const existingLeaves: Array<{
-				typeId: number
-				typeName: string | undefined
-				nameId: number
-				nameName: string | undefined
-				language: number
-				codePage: number
-				dataRVA: number
-				dataSize: number
-			}> = []
+			const existingLeaves: PEResourceLeaf[] = []
 
 			if (rsrcSectionIndex !== -1 && existingResourceRVA !== 0) {
 				const rsrc = sections[rsrcSectionIndex]
@@ -398,7 +410,7 @@ export class Injector implements InjectorInterface {
 			}
 
 			// Fixup RVAs in the directory buffer: add newVa as base
-			this.#fixupDirectoryRVAs(directoryBuffer, newVa)
+			this.#fixupDataEntries(directoryBuffer, 0, newVa)
 
 			// Write the directory buffer
 			appendFileSync(this.#options.executable, directoryBuffer)
@@ -446,16 +458,7 @@ export class Injector implements InjectorInterface {
 		sectionFileOffset: number,
 		sectionRva: number,
 		dirOffset: number,
-		leaves: Array<{
-			typeId: number
-			typeName: string | undefined
-			nameId: number
-			nameName: string | undefined
-			language: number
-			codePage: number
-			dataRVA: number
-			dataSize: number
-		}>,
+		leaves: PEResourceLeaf[],
 		depth: number,
 		currentTypeId: number,
 		currentTypeName: string | undefined,
@@ -552,15 +555,7 @@ export class Injector implements InjectorInterface {
 
 	// --- PE: convert RVA to file offset using section table ---
 
-	#rvaToFileOffset(
-		rva: number,
-		sections: Array<{
-			virtualAddress: number
-			virtualSize: number
-			rawSize: number
-			rawOffset: number
-		}>,
-	): number {
+	#rvaToFileOffset(rva: number, sections: readonly PESection[]): number {
 		for (const s of sections) {
 			const sectionEnd = s.virtualAddress + Math.max(s.virtualSize, s.rawSize)
 			if (rva >= s.virtualAddress && rva < sectionEnd) {
@@ -573,44 +568,13 @@ export class Injector implements InjectorInterface {
 	// --- PE: build the resource tree for serialization ---
 
 	#buildResourceTree(
-		existingLeaves: Array<{
-			typeId: number
-			typeName: string | undefined
-			nameId: number
-			nameName: string | undefined
-			language: number
-			codePage: number
-			dataRVA: number
-			dataSize: number
-		}>,
+		existingLeaves: readonly PEResourceLeaf[],
 		blobName: string,
 		blobSize: number,
-	): Map<
-		string,
-		Map<
-			string,
-			Array<{
-				language: number
-				codePage: number
-				leafIndex: number
-				dataSize: number
-			}>
-		>
-	> {
+	): Map<string, Map<string, PEResourceEntry[]>> {
 		// Tree: typeKey → nameKey → language entries
 		// typeKey/nameKey encode both named and integer IDs
-		const tree = new Map<
-			string,
-			Map<
-				string,
-				Array<{
-					language: number
-					codePage: number
-					leafIndex: number
-					dataSize: number
-				}>
-			>
-		>()
+		const tree = new Map<string, Map<string, PEResourceEntry[]>>()
 
 		// Add existing leaves
 		for (let i = 0; i < existingLeaves.length; i++) {
@@ -663,18 +627,7 @@ export class Injector implements InjectorInterface {
 	// --- PE: serialize the resource tree into a buffer ---
 
 	#serializeResourceTree(
-		tree: Map<
-			string,
-			Map<
-				string,
-				Array<{
-					language: number
-					codePage: number
-					leafIndex: number
-					dataSize: number
-				}>
-			>
-		>,
+		tree: ReadonlyMap<string, ReadonlyMap<string, readonly PEResourceEntry[]>>,
 		leafDataMap: Map<number, Buffer>,
 		blobSize: number,
 	): {
@@ -900,7 +853,7 @@ export class Injector implements InjectorInterface {
 					}
 
 					// Store as relative offset from section start for now;
-					// #fixupDirectoryRVAs will add the section VA
+					// #fixupDataEntries will add the section VA
 					buf.writeUInt32LE(dataOffset, dataEntryPos) // DataRVA (placeholder)
 					buf.writeUInt32LE(entry.dataSize, dataEntryPos + 4) // Size
 					buf.writeUInt32LE(entry.codePage, dataEntryPos + 8) // CodePage
@@ -914,32 +867,13 @@ export class Injector implements InjectorInterface {
 	}
 
 	// --- PE: fix up all data entry RVAs by adding the section's virtual address ---
+	//
+	// The serialized layout is [directories] [strings] [data entries], and each
+	// data entry's first DWORD is the DataRVA that gains the section VA. The
+	// entries are reached by re-walking the directory tree, whose level-2 entries
+	// point at them.
 
-	#fixupDirectoryRVAs(directoryBuffer: Buffer, sectionVA: number): void {
-		// Data entries are at the end of the directory buffer.
-		// Each is 16 bytes: DataRVA(4), Size(4), CodePage(4), Reserved(4)
-		// We need to find them and add sectionVA to the DataRVA field.
-		//
-		// Data entries are pointed to by level-2 directory entries.
-		// Rather than re-walking the tree, we know that data entries are
-		// contiguous at the end of the buffer (before strings, which we
-		// placed between directories and data entries — wait, actually
-		// strings come before data entries in our layout).
-		//
-		// Our layout: [directories] [strings] [data entries]
-		// The data entries all need their first DWORD (DataRVA) adjusted.
-		//
-		// We can find them by scanning for references from directory entries.
-		// But a simpler approach: we marked data entry positions during
-		// serialization. Let's just scan the buffer for data entry blocks.
-		//
-		// Actually the simplest: re-walk the level-2 directory entries to
-		// find the data entry offsets, then fix them up.
-
-		this.#fixupDataEntries(directoryBuffer, 0, 0, sectionVA)
-	}
-
-	#fixupDataEntries(buf: Buffer, dirOffset: number, depth: number, sectionVA: number): void {
+	#fixupDataEntries(buf: Buffer, dirOffset: number, sectionVA: number): void {
 		if (dirOffset + PE_RESOURCE_DIR_SIZE > buf.length) return
 
 		const namedCount = buf.readUInt16LE(dirOffset + 12)
@@ -955,7 +889,7 @@ export class Injector implements InjectorInterface {
 			if ((offsetOrData & PE_RESOURCE_SUBDIR_FLAG) !== 0) {
 				// Subdirectory — recurse
 				const subOffset = offsetOrData & ~PE_RESOURCE_SUBDIR_FLAG
-				this.#fixupDataEntries(buf, subOffset, depth + 1, sectionVA)
+				this.#fixupDataEntries(buf, subOffset, sectionVA)
 			} else {
 				// Data entry — fix up the RVA
 				if (offsetOrData + 4 <= buf.length) {
@@ -1047,24 +981,10 @@ export class Injector implements InjectorInterface {
 		const resource = this.#options.resource
 		const overwrite = this.#options.overwrite !== false
 
-		const PT_LOAD = 1
-		const PT_PHDR = 6
-		const PF_R = 4
-		const PAGE = 0x1000
-
 		let phdrOffset: number
 		let phdrEntrySize: number
 		let phdrCount: number
-		let headers: Array<{
-			type: number
-			flags: number
-			offset: number
-			vaddr: number
-			paddr: number
-			filesz: number
-			memsz: number
-			align: number
-		}>
+		let headers: readonly ELFProgramHeader[]
 
 		const fd = openSync(exePath, 'r')
 		try {
@@ -1094,11 +1014,12 @@ export class Injector implements InjectorInterface {
 
 			headers = this.#readELFProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
 
-			// Neutralize any stale PT_NOTE with a matching name so overwrite
-			// never leaves two competing "NODE_SEA*" notes visible to
-			// postject_find_resource — runtime skips any non-PT_NOTE entry.
-			for (const header of headers) {
-				if (header.type !== ELF_PT_NOTE) continue
+			// Collect any stale PT_NOTE with a matching name, refusing the whole
+			// injection first when the caller forbade an overwrite.
+			const stale = new Set<number>()
+			for (let i = 0; i < headers.length; i++) {
+				const header = headers[i]
+				if (header === undefined || header.type !== ELF_PT_NOTE) continue
 				const existingName = this.#readELFNoteName(fd, header.offset, header.filesz)
 				if (existingName === undefined || !existingName.startsWith('NODE_SEA')) continue
 				if (!overwrite) {
@@ -1107,8 +1028,13 @@ export class Injector implements InjectorInterface {
 						resource,
 					})
 				}
-				header.type = 0 // PT_NULL
+				stale.add(i)
 			}
+
+			// Neutralize each stale note so overwrite never leaves two competing
+			// "NODE_SEA*" notes visible to postject_find_resource — runtime skips
+			// any non-PT_NOTE entry.
+			headers = headers.map((header, index) => (stale.has(index) ? { ...header, type: 0 } : header))
 		} finally {
 			closeSync(fd)
 		}
@@ -1119,11 +1045,11 @@ export class Injector implements InjectorInterface {
 		// NODE_SEA notes from memory, never from the file).
 		let maxVaddrEnd = 0
 		for (const header of headers) {
-			if (header.type !== PT_LOAD) continue
+			if (header.type !== ELF_PT_LOAD) continue
 			const end = header.vaddr + header.memsz
 			if (end > maxVaddrEnd) maxVaddrEnd = end
 		}
-		const regionVaddr = alignTo(maxVaddrEnd, PAGE)
+		const regionVaddr = alignTo(maxVaddrEnd, ELF_PAGE_SIZE)
 
 		const blobSize = statSync(this.#options.blob).size
 		const { header: noteHeader, total: noteTotal } = buildELFNoteHeader(resource, blobSize)
@@ -1134,22 +1060,22 @@ export class Injector implements InjectorInterface {
 		const regionSize = noteAreaSize + phtSize
 
 		const fileSize = statSync(exePath).size
-		const regionStart = alignTo(fileSize, PAGE)
+		const regionStart = alignTo(fileSize, ELF_PAGE_SIZE)
 		const phtOff = regionStart + noteAreaSize
 
-		const newLoad = {
-			type: PT_LOAD,
-			flags: PF_R,
+		const newLoad: ELFProgramHeader = {
+			type: ELF_PT_LOAD,
+			flags: ELF_PF_R,
 			offset: regionStart,
 			vaddr: regionVaddr,
 			paddr: regionVaddr,
 			filesz: regionSize,
 			memsz: regionSize,
-			align: PAGE,
+			align: ELF_PAGE_SIZE,
 		}
-		const newNote = {
+		const newNote: ELFProgramHeader = {
 			type: ELF_PT_NOTE,
-			flags: PF_R,
+			flags: ELF_PF_R,
 			offset: regionStart,
 			vaddr: regionVaddr,
 			paddr: regionVaddr,
@@ -1167,7 +1093,7 @@ export class Injector implements InjectorInterface {
 		// derive a wrong value here since the PHT no longer sits at its
 		// original load-relative offset.
 		const finalHeaders = headers.map((header) => {
-			if (header.type !== PT_PHDR) return header
+			if (header.type !== ELF_PT_PHDR) return header
 			const relVaddr = regionVaddr + (phtOff - regionStart)
 			return {
 				...header,
@@ -1229,26 +1155,8 @@ export class Injector implements InjectorInterface {
 		phdrOffset: number,
 		entrySize: number,
 		count: number,
-	): Array<{
-		type: number
-		flags: number
-		offset: number
-		vaddr: number
-		paddr: number
-		filesz: number
-		memsz: number
-		align: number
-	}> {
-		const headers: Array<{
-			type: number
-			flags: number
-			offset: number
-			vaddr: number
-			paddr: number
-			filesz: number
-			memsz: number
-			align: number
-		}> = []
+	): readonly ELFProgramHeader[] {
+		const headers: ELFProgramHeader[] = []
 		for (let i = 0; i < count; i++) {
 			const off = phdrOffset + i * entrySize
 			headers.push({
@@ -1267,20 +1175,7 @@ export class Injector implements InjectorInterface {
 
 	// --- ELF: serialize a single program header entry (56 bytes, ELF64) ---
 
-	#writeELFProgramHeaderEntry(
-		buf: Buffer,
-		pos: number,
-		entry: {
-			type: number
-			flags: number
-			offset: number
-			vaddr: number
-			paddr: number
-			filesz: number
-			memsz: number
-			align: number
-		},
-	): void {
+	#writeELFProgramHeaderEntry(buf: Buffer, pos: number, entry: ELFProgramHeader): void {
 		buf.writeUInt32LE(entry.type >>> 0, pos)
 		buf.writeUInt32LE(entry.flags >>> 0, pos + 4)
 		buf.writeBigUInt64LE(BigInt(entry.offset), pos + 8)
@@ -1314,7 +1209,7 @@ export class Injector implements InjectorInterface {
 		phdrEntrySize: number,
 	): void {
 		const headers = this.#readELFProgramHeaders(fd, phdrOffset, phdrEntrySize, phdrCount)
-		const loads = headers.filter((h) => h.type === 1)
+		const loads = headers.filter((h) => h.type === ELF_PT_LOAD)
 		const notes = headers.filter((h) => h.type === ELF_PT_NOTE)
 
 		for (const note of notes) {
@@ -1439,9 +1334,9 @@ export class Injector implements InjectorInterface {
 				})
 			}
 
-			const Loff = Number(buf.readBigUInt64LE(linkeditCmd.offset + 40))
-			const Lsize = Number(buf.readBigUInt64LE(linkeditCmd.offset + 48))
-			const Lvm = buf.readBigUInt64LE(linkeditCmd.offset + 24)
+			const linkeditOffset = Number(buf.readBigUInt64LE(linkeditCmd.offset + 40))
+			const linkeditSize = Number(buf.readBigUInt64LE(linkeditCmd.offset + 48))
+			const linkeditAddress = buf.readBigUInt64LE(linkeditCmd.offset + 24)
 
 			const blobSize = statSync(this.#options.blob).size
 			// arm64 (0x0100000c) requires 16K pages; every other architecture (x86_64
@@ -1490,8 +1385,9 @@ export class Injector implements InjectorInterface {
 			}
 
 			// --- Mutate in place: shift __LINKEDIT and every linkedit-relative
-			// offset field in the surviving commands, using the ORIGINAL Loff as
-			// the "does this offset point into __LINKEDIT" threshold. ---
+			// offset field in the surviving commands, using the ORIGINAL
+			// linkeditOffset as the "does this offset point into __LINKEDIT"
+			// threshold. ---
 			for (let i = 0; i < commands.length; i++) {
 				const cmd = commands[i]
 				if (cmd === undefined || existingSegmentIndices.includes(i)) continue
@@ -1507,14 +1403,14 @@ export class Injector implements InjectorInterface {
 								executable: exePath,
 							})
 						}
-						buf.writeBigUInt64LE(Lvm + BigInt(shift), cmd.offset + 24) // vmaddr
-						buf.writeBigUInt64LE(BigInt(Loff + shift), cmd.offset + 40) // fileoff
+						buf.writeBigUInt64LE(linkeditAddress + BigInt(shift), cmd.offset + 24) // vmaddr
+						buf.writeBigUInt64LE(BigInt(linkeditOffset + shift), cmd.offset + 40) // fileoff
 						// filesize/vmsize unchanged — __LINKEDIT keeps its size, only moves.
 					}
 					continue
 				}
 
-				this.#shiftMachOLinkeditOffsets(buf, cmd, Loff, shift)
+				this.#shiftMachOLinkeditOffsets(buf, cmd, linkeditOffset, shift)
 			}
 
 			buf.writeUInt32LE(newNcmds, 16)
@@ -1527,9 +1423,9 @@ export class Injector implements InjectorInterface {
 			cmd.writeUInt32LE(MACHO_LC_SEGMENT_64, 0)
 			cmd.writeUInt32LE(newCmdSize, 4)
 			cmd.write(segmentName, 8, 16, 'ascii')
-			cmd.writeBigUInt64LE(Lvm, 24) // vmaddr
+			cmd.writeBigUInt64LE(linkeditAddress, 24) // vmaddr
 			cmd.writeBigUInt64LE(BigInt(shift), 32) // vmsize
-			cmd.writeBigUInt64LE(BigInt(Loff), 40) // fileoff
+			cmd.writeBigUInt64LE(BigInt(linkeditOffset), 40) // fileoff
 			cmd.writeBigUInt64LE(BigInt(shift), 48) // filesize
 			cmd.writeUInt32LE(1, 56) // maxprot: VM_PROT_READ
 			cmd.writeUInt32LE(1, 60) // initprot: VM_PROT_READ
@@ -1539,9 +1435,9 @@ export class Injector implements InjectorInterface {
 			const sectOff = 72
 			cmd.write(sectionName, sectOff, 16, 'ascii')
 			cmd.write(segmentName, sectOff + 16, 16, 'ascii')
-			cmd.writeBigUInt64LE(Lvm, sectOff + 32) // addr
+			cmd.writeBigUInt64LE(linkeditAddress, sectOff + 32) // addr
 			cmd.writeBigUInt64LE(BigInt(blobSize), sectOff + 40) // size
-			cmd.writeUInt32LE(Loff, sectOff + 48) // offset
+			cmd.writeUInt32LE(linkeditOffset, sectOff + 48) // offset
 			cmd.writeUInt32LE(0, sectOff + 52) // align
 			cmd.writeUInt32LE(0, sectOff + 56) // reloff
 			cmd.writeUInt32LE(0, sectOff + 60) // nreloc
@@ -1572,7 +1468,7 @@ export class Injector implements InjectorInterface {
 			}
 
 			// --- Stream-write to a sibling temp, then atomically rename over
-			// exePath: header+LCs, unchanged body up to Loff (streamed from
+			// exePath: header+LCs, unchanged body up to linkeditOffset (streamed from
 			// srcFd), the blob (streamed from its own fd, padded to `shift`),
 			// then the relocated __LINKEDIT (streamed from srcFd). The body
 			// range starts at the NEW command-region end (not the old
@@ -1590,7 +1486,12 @@ export class Injector implements InjectorInterface {
 
 			writeSync(destFd, buf.subarray(0, headerSize))
 			writeSync(destFd, newLoadCmdsBuf)
-			copyRange(srcFd, destFd, headerSize + newSizeofcmds, Loff - (headerSize + newSizeofcmds))
+			copyRange(
+				srcFd,
+				destFd,
+				headerSize + newSizeofcmds,
+				linkeditOffset - (headerSize + newSizeofcmds),
+			)
 
 			blobFd = openSync(this.#options.blob, 'r')
 			copyRange(blobFd, destFd, 0, blobSize)
@@ -1601,7 +1502,7 @@ export class Injector implements InjectorInterface {
 			if (blobPadding > 0) {
 				writeSync(destFd, Buffer.alloc(blobPadding))
 			}
-			copyRange(srcFd, destFd, Loff, Lsize)
+			copyRange(srcFd, destFd, linkeditOffset, linkeditSize)
 
 			closeSync(destFd)
 			destFd = undefined
@@ -1620,7 +1521,7 @@ export class Injector implements InjectorInterface {
 
 			// Build-time readback: verify the section by its section table entry,
 			// consistent with what was just written.
-			this.#verifyMachOSection(exePath, segmentName, sectionName, Loff, blobSize)
+			this.#verifyMachOSection(exePath, segmentName, sectionName, linkeditOffset, blobSize)
 		} finally {
 			// Guard each close so a throw from one does not skip the rest of the
 			// cleanup (a leaked fd or a stray temp masking the original error).

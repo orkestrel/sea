@@ -1,6 +1,7 @@
 // The consumer-side guides-parity drop-in: runs `@orkestrel/guide`'s checks against
-// this repo's own `guides/README.md` manifest. The five constants below are this
-// package's own, and are the only part a sibling package changes.
+// this repo's own `guides/README.md` manifest. The shared drop-in runs first. The
+// constants naming this package's own modules, and the `sea.md fences` transcriptions
+// that close the file, are the parts a sibling package changes.
 
 import { describe, expect, it } from 'vitest'
 import {
@@ -20,6 +21,21 @@ import {
 import { readFileSync } from 'node:fs'
 import { requireValue } from '@orkestrel/test'
 import { readInventory } from '@orkestrel/test/server'
+import {
+	alignELFNoteSize,
+	alignTo,
+	buildSignCommand,
+	computeSize,
+	createAsset,
+	formatSize,
+	isCompressible,
+	isExecutableFormat,
+	isPlatformSupported,
+	isPowerOfTwo,
+	redactCommand,
+	resolvePlatform,
+	stripTrailingNulls,
+} from '@src/server'
 
 /** Every fence language this package's guides are allowed to use. */
 const FENCE_LANGUAGES = Object.freeze(['ts'])
@@ -168,3 +184,57 @@ for (const entry of manifest) {
 		})
 	})
 }
+
+describe('sea.md fences', () => {
+	it('returns the sizes the compression fence prints', () => {
+		const size = computeSize(1000, 400)
+
+		expect(size).toEqual({ original: 1000, compressed: 400, ratio: 0.4 })
+		expect(formatSize(size.compressed)).toBe('400 B')
+		expect(isCompressible('dist/app/browser/index.html')).toBe(true)
+	})
+
+	it('returns the alignments the binary-helper fence prints', () => {
+		expect(alignTo(4097, 4096)).toBe(8192)
+		expect(alignELFNoteSize(10)).toBe(12)
+		expect(isPowerOfTwo(4096)).toBe(true)
+	})
+
+	it('returns the values the format and name fences print', () => {
+		expect(isExecutableFormat('elf')).toBe(true)
+		expect(stripTrailingNulls('.rsrc\0\0\0')).toBe('.rsrc')
+	})
+
+	it('returns the argv the signing fence prints', () => {
+		expect(redactCommand(['signtool', 'sign', '/p', 'hunter2'])).toEqual([
+			'signtool',
+			'sign',
+			'/p',
+			'***',
+		])
+		expect(
+			buildSignCommand(
+				{ thumbprint: 'AABBCCDDEEFF00112233445566778899AABBCCDD' },
+				'dist/sea/app.exe',
+			),
+		).toEqual([
+			'signtool',
+			'sign',
+			'/fd',
+			'sha256',
+			'/sha1',
+			'AABBCCDDEEFF00112233445566778899AABBCCDD',
+			'dist/sea/app.exe',
+		])
+	})
+
+	it('infers the asset compression flag the asset fence prints', () => {
+		expect(createAsset({ key: 'client.html.br', content: new ArrayBuffer(0) }).compressed).toBe(
+			true,
+		)
+	})
+
+	it('reports the platform support the platform fence prints', () => {
+		expect(isPlatformSupported()).toBe(resolvePlatform() !== undefined)
+	})
+})

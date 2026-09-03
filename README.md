@@ -57,7 +57,8 @@ process.stdout.write(
 - **Hide the Windows terminal** — `windows: { terminal: false }` patches the
   PE subsystem field so a GUI application launches without a console window.
 - **Runtime asset access** — `AssetManager` loads assets embedded in the SEA
-  blob via `node:sea`, or falls back to disk in development.
+  blob through `node:sea`, and `load()` reads the paths its `assets` option
+  configures from disk in development.
 - **Open the browser** — `openBrowser(url)` is a runtime helper (not a build
   step) for a bundled local-UI app to launch the system default browser at
   its own served address. Best-effort, detached, argv-only dispatch.
@@ -102,7 +103,7 @@ process.stdout.write(
 
 ## Compatibility
 
-- **Node.js >= 24** is required; the package is a single Node-native
+- **Node.js >= 24.8.0** is required; the package is a single Node-native
   server-only surface (no CommonJS/browser split).
 - **ESM entry requires a Node ≥ 25.7 build host.** `entry: { format: 'esm' }`
   emits `mainFormat: 'module'`, a SEA-config field that only exists starting

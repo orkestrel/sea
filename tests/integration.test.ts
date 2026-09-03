@@ -1,8 +1,8 @@
-// Real SEA build integration battery (AGENTS §16.1) — these tests copy the
-// real node binary and shell out to `node --experimental-sea-config`, which
-// is slow (~100MB copy + subprocess) and environment-dependent, so they are
-// kept OUT of the default `test` run and live in this dedicated, opt-in
-// `integration` project instead (run via `npm run test:integration`).
+// Real SEA build integration battery — these tests copy the real node binary and
+// spawn `node --experimental-sea-config`, so they are slow (~100MB copy plus a
+// subprocess) and depend on the host binary's layout. They run in the
+// `integration` project, which `npm test` reaches through `npm run
+// test:integration`.
 import type { SEACompressionManifest } from '@src/server'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -10,46 +10,38 @@ import { createSEA, isSEAError, SEA } from '@src/server'
 import { requireValue } from '@orkestrel/test'
 import { createSEAOptions, withTestDir } from './setupServer.js'
 
-describe('seal integration', () => {
-	// Injects into the CURRENT node binary's real executable format. On some
-	// platforms/binaries the target has no free program-header slot for the
-	// injected segment (a genuine binary-layout limitation, not a test bug) —
-	// skip gracefully rather than fail when that specific condition occurs.
-	it('builds a single executable application end-to-end', async (context) => {
+describe('sea integration', () => {
+	it('builds a single executable application end-to-end', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
 				const events: string[] = []
-				const seal = createSEA(
+				const sea = createSEA(
 					createSEAOptions({
 						root: scratch.path,
 					}),
 				)
 
-				seal.emitter.on('compress', () => {
+				sea.emitter.on('compress', () => {
 					events.push('compress')
 				})
-				seal.emitter.on('blob', () => {
+				sea.emitter.on('blob', () => {
 					events.push('blob')
 				})
-				seal.emitter.on('assemble', () => {
+				sea.emitter.on('assemble', () => {
 					events.push('assemble')
 				})
-				seal.emitter.on('complete', () => {
+				sea.emitter.on('complete', () => {
 					events.push('complete')
 				})
 
-				let result: Awaited<ReturnType<typeof seal.execute>>
+				let result: Awaited<ReturnType<typeof sea.execute>>
 				try {
-					result = await seal.execute()
+					result = await sea.execute()
 				} catch (error) {
-					seal.destroy()
-					if (error instanceof Error && error.message.includes('free program header entry')) {
-						context.skip()
-						return
-					}
+					sea.destroy()
 					throw error
 				}
 
@@ -70,7 +62,7 @@ describe('seal integration', () => {
 				}
 				expect(result).toMatchObject(platformExpectations[process.platform] ?? {})
 
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	}, 120000)
@@ -78,10 +70,10 @@ describe('seal integration', () => {
 	it('writes a sea-config.json reflecting an explicit entry format', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
-				const seal = createSEA(
+				const sea = createSEA(
 					createSEAOptions({
 						root: scratch.path,
 						entry: { path: 'entry.cjs', format: 'cjs' },
@@ -89,7 +81,7 @@ describe('seal integration', () => {
 				)
 
 				try {
-					await seal.execute()
+					await sea.execute()
 				} catch {
 					// The config is written by #blob before assembly ever runs, so
 					// the assertion below holds even when assemble/injection fails
@@ -106,7 +98,7 @@ describe('seal integration', () => {
 					useSnapshot: false,
 				})
 
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	}, 120000)
@@ -114,7 +106,7 @@ describe('seal integration', () => {
 	it('embeds compressed asset outputs under original keys without mutating asset options', async () => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 				'assets/index.html': '<main>compressed client</main>',
 				'assets/logo.png': 'uncompressed image',
 			},
@@ -125,7 +117,7 @@ describe('seal integration', () => {
 					'logo.png': 'assets/logo.png',
 				}
 				const reports: SEACompressionManifest[] = []
-				const seal = createSEA(
+				const sea = createSEA(
 					createSEAOptions({
 						root: scratch.path,
 						assets,
@@ -142,7 +134,7 @@ describe('seal integration', () => {
 					}),
 				)
 
-				const error: unknown = await seal.execute().then(
+				const error: unknown = await sea.execute().then(
 					() => undefined,
 					(thrown: unknown) => thrown,
 				)
@@ -167,23 +159,24 @@ describe('seal integration', () => {
 					'logo.png': 'assets/logo.png',
 				})
 
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	}, 120000)
 
-	// Injects into the CURRENT node binary's real executable format. On some
-	// platforms/binaries the target has no free program-header slot for the
-	// injected segment (a genuine binary-layout limitation, not a test bug) —
-	// skip gracefully rather than fail when that specific condition occurs.
+	// Injects into the CURRENT node binary's real executable format. A host binary
+	// can leave no room for the write: a PE with less header slack than one section
+	// entry needs, or a Mach-O whose first section sits too close to its load-command
+	// table for another segment command. The injector reports either as `INJECT`, so
+	// that code is the applicability limit this skip covers.
 	it('supports stage hooks through the on option', async (context) => {
 		await withTestDir(
 			{
-				'entry.cjs': "console.log('hello from seal')\n",
+				'entry.cjs': "console.log('hello from sea')\n",
 			},
 			async (scratch) => {
 				const events: string[] = []
-				const seal = new SEA(
+				const sea = new SEA(
 					createSEAOptions({
 						root: scratch.path,
 						on: {
@@ -204,9 +197,9 @@ describe('seal integration', () => {
 				)
 
 				try {
-					await seal.execute()
+					await sea.execute()
 				} catch (error) {
-					seal.destroy()
+					sea.destroy()
 					if (isSEAError(error) && error.code === 'INJECT') {
 						context.skip()
 						return
@@ -215,7 +208,7 @@ describe('seal integration', () => {
 				}
 
 				expect(events).toEqual(['compress', 'blob', 'assemble', 'complete'])
-				seal.destroy()
+				sea.destroy()
 			},
 		)
 	}, 120000)

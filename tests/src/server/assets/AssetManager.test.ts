@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { AssetManager } from '@src/server'
+import { requireValue } from '@orkestrel/test'
 import { encodeContent } from '../../../setup.js'
+import { withTestDir } from '../../../setupServer.js'
 
 describe('AssetManager', () => {
 	// === count / assets / keys
@@ -163,6 +165,95 @@ describe('AssetManager', () => {
 		expect(cleared).toBe(true)
 
 		manager.destroy()
+	})
+
+	// === disk load
+
+	it('registers every configured asset the disk carries', async () => {
+		await withTestDir(
+			{ 'public/client.html': '<main>client</main>', 'public/client.html.br': 'brotli-bytes' },
+			(scratch) => {
+				const loaded: string[][] = []
+				const manager = new AssetManager({
+					root: scratch.path,
+					assets: {
+						'client.html': 'public/client.html',
+						'client.html.br': 'public/client.html.br',
+					},
+					on: {
+						load: (keys) => {
+							loaded.push([...keys])
+						},
+					},
+				})
+
+				manager.load()
+
+				expect(manager.keys()).toEqual(['client.html', 'client.html.br'])
+				expect(manager.asset('client.html')?.compressed).toBe(false)
+				expect(manager.asset('client.html.br')?.compressed).toBe(true)
+				expect(new TextDecoder().decode(requireValue(manager.asset('client.html')).content)).toBe(
+					'<main>client</main>',
+				)
+				expect(loaded).toEqual([['client.html', 'client.html.br']])
+
+				manager.destroy()
+			},
+		)
+	})
+
+	it('emits one error for a configured asset the disk does not carry', async () => {
+		await withTestDir({}, (scratch) => {
+			const errors: unknown[] = []
+			const loaded: string[][] = []
+			const manager = new AssetManager({
+				root: scratch.path,
+				assets: { 'client.html': 'public/client.html' },
+				on: {
+					error: (error) => {
+						errors.push(error)
+					},
+					load: (keys) => {
+						loaded.push([...keys])
+					},
+				},
+			})
+
+			manager.load()
+
+			expect(errors).toHaveLength(1)
+			expect(loaded).toEqual([])
+			expect(manager.count).toBe(0)
+
+			manager.destroy()
+		})
+	})
+
+	it('emits nothing when no assets are configured', async () => {
+		await withTestDir({}, (scratch) => {
+			const events: string[] = []
+			const manager = new AssetManager({
+				root: scratch.path,
+				on: {
+					register: () => {
+						events.push('register')
+					},
+					load: () => {
+						events.push('load')
+					},
+					error: () => {
+						events.push('error')
+					},
+				},
+			})
+
+			manager.load()
+
+			expect(events).toEqual([])
+			expect(manager.count).toBe(0)
+
+			manager.destroy()
+		})
 	})
 
 	// === SEA-embedded load
