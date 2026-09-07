@@ -473,11 +473,11 @@ export interface SEAOptions {
  * valid stdio, so `process.stdout`/`stderr`/`stdin` are detached and console
  * output is discarded; use only for windowless apps.
  * `sign`      — Authenticode signing options. When present, the assembled
- * executable is signed with `signtool` (and verified) as the LAST content
+ * executable is signed with `signtool` (and verified) as the last content
  * mutation before the atomic finalize; when absent, the output is unsigned
  * and `SEAResult.signed` is `false`.
  *
- * These options apply only when the build HOST is Windows — there is no
+ * These options apply only when the build host is Windows — there is no
  * cross-compilation, so building on a non-Windows host ignores `windows.*`.
  */
 export interface SEAWindowsOptions {
@@ -490,7 +490,7 @@ export interface SEAWindowsOptions {
  *
  * @remarks
  * `file`       — path to a `.pfx`/`.p12` certificate file (`signtool /f`).
- * `password`   — certificate password (`signtool /p`). SENSITIVE — never
+ * `password`   — certificate password (`signtool /p`). Sensitive: never
  * logged and never included in a thrown error's message or `context`.
  * `thumbprint` — SHA1 thumbprint of a certificate already installed in the
  * Windows certificate store (`signtool /sha1`).
@@ -498,7 +498,7 @@ export interface SEAWindowsOptions {
  * `/td <digest>`).
  * `digest`     — file digest algorithm (`signtool /fd`). Default: `'sha256'`.
  *
- * Exactly ONE of `file` or `thumbprint` must be supplied — they identify two
+ * Exactly one of `file` or `thumbprint` must be supplied — they identify two
  * different certificate sources and are mutually exclusive. `password`
  * pairs with `file` (a store-resident certificate referenced by
  * `thumbprint` has no associated password to supply here).
@@ -548,7 +548,11 @@ export interface SEAInterface {
 	readonly emitter: EmitterInterface<SEAEventMap>
 	/** Holds the phase the build has reached. */
 	readonly status: SEAStatus
-	/** Runs the compress, blob, and assemble stages and returns the build result. */
+	/**
+	 * Runs the compress, blob, and assemble stages and returns the build result.
+	 *
+	 * @throws SEAError with the `SEAErrorCode` of the stage that failed, after `status` becomes `'error'`
+	 */
 	execute(): Promise<SEAResult>
 	/** Tears down the emitter. */
 	destroy(): void

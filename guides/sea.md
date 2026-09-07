@@ -1,4 +1,4 @@
-# SEA — Single Executable Application Builder
+# SEA
 
 > The Node.js single executable application (SEA) builder: a pure-TypeScript pipeline
 > that compresses assets, assembles the SEA blob, injects it into a copy of the host
@@ -10,6 +10,8 @@ source sits under [`src/server`](../src/server).
 ## Overview
 
 ### Build a single executable
+
+Describe the build to `createSEA` — its entry script, output directory, assets, and compression — then `await sea.execute()` for the finished executable and its size:
 
 ```ts
 import { createSEA, formatSize } from '@orkestrel/sea'
@@ -153,7 +155,7 @@ A `Shape` cell holds the constant's declared type.
 
 ### Types
 
-A `Shape` cell holds an interface's data members as bare names in braces, `?` marking an optional member and `plus` introducing its call-signature members, and a type alias's own type literal with a union's arms escaped as `\|`.
+A `Shape` cell holds an interface's data members as bare names in braces, `?` marking an optional member and `plus` introducing its call-signature members, and a type alias's own type literal with a union's arms escaped as `\|`. An extended interface's name comes before `plus`, with the members it adds after.
 
 | API                      | Kind      | Shape                                                                                                                                                                     | Summary                                                                                 |
 | ------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
@@ -164,7 +166,7 @@ A `Shape` cell holds an interface's data members as bare names in braces, `?` ma
 | `SEAProgress`            | interface | `{ path, current, total }`                                                                                                                                                | Represents the progress reported while compressing a directory.                         |
 | `SEACompressionHandler`  | type      | `(result: SEACompressionResult) => void`                                                                                                                                  | Describes the callback `compressDirectory` invokes after each file it compresses.       |
 | `SEABrotliOptions`       | interface | `{ mode?, quality? }`                                                                                                                                                     | Controls how Brotli encodes one file.                                                   |
-| `SEACompressionOptions`  | interface | `{ paths, mode?, quality? }`                                                                                                                                              | Controls Brotli compression of one or more directories.                                 |
+| `SEACompressionOptions`  | interface | `SEABrotliOptions plus { paths }`                                                                                                                                         | Controls Brotli compression of one or more directories.                                 |
 | `SEAPlatform`            | interface | `{ executable, remove?, sign?, verify? }`                                                                                                                                 | Represents a platform-specific SEA build configuration.                                 |
 | `SEAShellOptions`        | interface | `{ cwd?, env?, timeout?, signal? }`                                                                                                                                       | Configures the execution of a shell command.                                            |
 | `ExecutableFormat`       | type      | `'pe' \| 'elf' \| 'macho'`                                                                                                                                                | Names an executable binary format detected from file header magic bytes.                |
@@ -195,7 +197,7 @@ A `Shape` cell holds an interface's data members as bare names in braces, `?` ma
 
 ## Methods
 
-The public methods of each behavioral interface — one table per type, keyed by its backticked name, every call-signature member listed. A `readonly` data member, `format` on `Injector` and `emitter` / `status` / `count` on the others, stays in the interface's `Shape` cell and off these tables. Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface.
+The public methods of each behavioral interface — one table per type, keyed by its backticked name, every call-signature member listed. A `readonly` data member stays in the interface's `Shape` cell and off these tables: `format` on `InjectorInterface`, `emitter` and `status` on `SEAInterface`, `emitter` and `count` on `AssetManagerInterface`. Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface.
 
 #### `SEAInterface`
 
@@ -232,6 +234,8 @@ The public methods of each behavioral interface — one table per type, keyed by
 
 ### Injecting a resource directly
 
+Construct an injector over an already-assembled executable, read the format it detected, and call `inject` to write the blob into it:
+
 ```ts
 import { createInjector } from '@orkestrel/sea'
 
@@ -248,6 +252,8 @@ injector.inject()
 ```
 
 ### Assets
+
+Create an asset from a buffer, register it with a manager configured to load more from disk, then read the collection back and tear it down:
 
 ```ts
 import { createAsset, createAssetManager } from '@orkestrel/sea'
@@ -270,6 +276,8 @@ manager.destroy()
 ```
 
 ### Boundary and formatting helpers
+
+Every helper the build pipeline runs on is exported too, from the shell boundary and the path assertions to the fixed-width binary readers, the PE patches, and the size formatter:
 
 ```ts
 import {

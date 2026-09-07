@@ -570,7 +570,7 @@ export function patchPESubsystem(path: string, subsystem: number): void {
  * @remarks
  * If the certificate overlay described by the security directory sits at the
  * very end of the file (the common case for `signtool`-signed binaries), the
- * file is truncated to the certificate's start FIRST so the overlay bytes are
+ * file is truncated to the certificate's start first so the overlay bytes are
  * discarded rather than left as dead weight for a downstream injector to
  * bury mid-file. The directory read is bounds-checked so a malformed or
  * truncated security directory cannot throw unexpectedly — it is skipped
@@ -615,13 +615,13 @@ export function stripPESignature(path: string): void {
  * Builds the `signtool sign` argv for signing a Windows executable.
  *
  * @remarks
- * Requires EXACTLY ONE certificate source — `sign.file` (a `.pfx`/`.p12`
+ * Requires exactly one certificate source — `sign.file` (a `.pfx`/`.p12`
  * file, paired with `sign.password` when present) XOR `sign.thumbprint` (a
  * certificate already installed in the Windows store). When `sign.timestamp`
  * is set it is parsed with the `URL` constructor and must be an `http:` or
  * `https:` URL. The returned argv is passed directly to `executeShell` — never
  * through a shell — so nothing in `sign` can be interpreted as a flag or
- * injected into a command line. `sign.password` is NEVER included in a
+ * injected into a command line. `sign.password` is never included in a
  * thrown error's message or `context`.
  *
  * @param sign - Windows signing options
@@ -749,7 +749,7 @@ export function ensureSafeKey(key: string): void {
  * Resolves `path` against `base`, then dereferences both the resolved path
  * and `base` with `realpathSync` and requires the real resolved path to
  * equal the real base or begin with the real base plus a path separator.
- * Dereferencing BOTH sides means a symlinked base itself (for example macOS `/tmp`
+ * Dereferencing both sides means a symlinked base itself (for example macOS `/tmp`
  * -> `/private/tmp`) still matches, while a symlink inside the tree that
  * points outside the real base is correctly rejected. A `realpathSync`
  * failure (for example `ENOENT`) is wrapped as a coded `SEAError` rather than
@@ -827,7 +827,7 @@ export function ensureSafeName(name: string): void {
  * Fsyncs a directory to durably persist a prior file rename/create within it.
  *
  * @remarks
- * A `rename`/`create` is only durable once its CONTAINING directory entry is
+ * A `rename`/`create` is only durable once its containing directory entry is
  * flushed — fsyncing the file itself is not enough. `path` is the directory
  * to fsync (callers pass `dirname(target)`, not the file itself). On Windows
  * there is no directory file handle to fsync, so this is a no-op there (the
@@ -921,7 +921,7 @@ export function finalizeExecutable(source: string, target: string): void {
  * @remarks
  * A pure leaf extracted from the SEA build orchestrator. The `mainFormat`
  * field (`'commonjs' | 'module'`) exists only in Node >= 25.7 — for a `'cjs'`
- * entry (the default) `mainFormat` is OMITTED entirely so the config still
+ * entry (the default) `mainFormat` is omitted entirely so the config still
  * builds on older Node hosts where `'commonjs'` is already the implicit
  * default; for an `'esm'` entry `mainFormat: 'module'` is set explicitly
  * (this requires a Node >= 25.7 build host). Node also documents that
