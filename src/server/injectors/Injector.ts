@@ -973,7 +973,7 @@ export class Injector implements InjectorInterface {
 	// program header table and repurpose it, or find space in the phdr
 	// table for a new entry.
 	//
-	// Node.js SEA on Linux reads PT_NOTE segments via dl_iterate_phdr,
+	// Node.js SEA on Linux reads PT_NOTE segments through dl_iterate_phdr,
 	// searching for a note whose name matches the resource name.
 
 	#injectELF(): void {
@@ -1241,8 +1241,8 @@ export class Injector implements InjectorInterface {
 	// file offset and virtual address.
 	//
 	// Node.js SEA on macOS uses getsectdata(segment, section) to find the
-	// blob. The segment defaults to "__POSTJECT" (or custom via options)
-	// and the section is "__" + resource.
+	// blob. The segment defaults to "__POSTJECT", or to a custom name the
+	// options carry, and the section is "__" + resource.
 
 	#injectMachO(): void {
 		const exePath = this.#options.executable
@@ -1253,7 +1253,7 @@ export class Injector implements InjectorInterface {
 		let injTemp: string | undefined
 
 		try {
-			// --- Bounded header read: just enough to cover every header/LC parse
+			// --- Bounded header read: only enough to cover every header/LC parse
 			// and mutation below (headerSize + sizeofcmds) — never the whole file. ---
 			const headerSize = 32 // Mach-O 64-bit header
 			const preHeader = Buffer.alloc(headerSize)
@@ -1339,8 +1339,8 @@ export class Injector implements InjectorInterface {
 			const linkeditAddress = buf.readBigUInt64LE(linkeditCmd.offset + 24)
 
 			const blobSize = statSync(this.#options.blob).size
-			// arm64 (0x0100000c) requires 16K pages; every other architecture (x86_64
-			// etc.) uses 4K — 0x4000 is a safe superset alignment for either.
+			// arm64 (0x0100000c) requires 16K pages; every other architecture,
+			// including x86_64, uses 4K — 0x4000 is a safe superset alignment for either.
 			const pageSize = cputype === 0x0100000c ? 0x4000 : 0x1000
 			const shift = alignTo(blobSize, pageSize)
 
@@ -1520,7 +1520,7 @@ export class Injector implements InjectorInterface {
 			injTemp = undefined
 
 			// Build-time readback: verify the section by its section table entry,
-			// consistent with what was just written.
+			// consistent with what was written.
 			this.#verifyMachOSection(exePath, segmentName, sectionName, linkeditOffset, blobSize)
 		} finally {
 			// Guard each close so a throw from one does not skip the rest of the

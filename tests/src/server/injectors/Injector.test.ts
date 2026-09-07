@@ -433,7 +433,7 @@ describe('Injector', () => {
 				const checksumOffset = optionalOffset + 64
 				const storedChecksum = result.readUInt32LE(checksumOffset)
 
-				// Confirm the fuse was actually flipped (sanity check the fixture).
+				// Confirm the fuse was actually flipped (a quick check of the fixture).
 				const fuseIndex = result.indexOf(Buffer.from(SEA_SENTINEL_FUSE, 'utf-8'))
 				expect(fuseIndex).not.toBe(-1)
 				expect(

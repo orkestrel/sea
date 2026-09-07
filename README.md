@@ -73,7 +73,7 @@ process.stdout.write(
   (`codesign --verify --strict`) as the final build step. An ad-hoc signature
   satisfies local Gatekeeper checks but is not a trusted, distributable
   signature — re-sign with a real Apple Developer ID for distribution.
-- **Windows** — signing is **optional**, via `windows.sign`. Provide exactly
+- **Windows** — signing is **optional**, through `windows.sign`. Provide exactly
   one of `file` (a `.pfx` path + `password`) or `thumbprint` (a cert-store
   SHA1 hash), plus an optional RFC 3161 `timestamp` URL and `digest`
   (defaults to `sha256`):
@@ -137,7 +137,7 @@ of those flows provide out of the box.
   AV/EDR heuristics flag for modified executables. Code-sign the output (see
   Code signing above) and, if needed, submit it to your vendor's allowlist.
 - **Windows SmartScreen warns on first launch.** The `.exe` is unsigned —
-  sign it via `windows.sign` (see Code signing above) to avoid the warning.
+  sign it through `windows.sign` (see Code signing above) to avoid the warning.
 - **macOS Gatekeeper blocks the app.** Gatekeeper requires a valid signature;
   the automatic ad-hoc signature (`codesign --sign -`) satisfies local
   Gatekeeper checks so it runs on the machine that built it, but for
@@ -148,7 +148,7 @@ of those flows provide out of the box.
 
 ## Example: embedded local UI
 
-A SEA whose entry starts a local server, serves a bundled `client.html` via
+A SEA whose entry starts a local server, serves a bundled `client.html` through
 `AssetManager`, and opens the system browser once ready:
 
 ```ts

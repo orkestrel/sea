@@ -6,7 +6,7 @@
 // is specific to this package: asset content encoding.
 
 /**
- * Encode `text` as UTF-8 into a freshly allocated `ArrayBuffer` — the asset-content shape
+ * Encodes `text` as UTF-8 into a freshly allocated `ArrayBuffer` — the asset-content shape
  * `Asset` and `AssetManager` accept. `TextEncoder` returns a view over a buffer the type
  * system knows only as `ArrayBufferLike`, so the bytes are copied into an owned
  * `ArrayBuffer` instead of asserted onto one (AGENTS: never use type assertions).

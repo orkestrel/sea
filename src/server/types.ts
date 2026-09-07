@@ -50,7 +50,7 @@ export interface SEACompressionManifest {
  * Represents the progress reported while compressing a directory.
  *
  * @remarks
- * `path`    — absolute path to the file just compressed.
+ * `path`    — absolute path to the file compressed most recently.
  * `current` — number of files compressed so far (1-based).
  * `total`   — total number of compressible files.
  */
@@ -225,7 +225,7 @@ export interface PESection {
  *
  * @remarks
  * `executable` — absolute path to the target executable.
- * `resource`   — resource identifier (e.g. `"NODE_SEA_BLOB"`).
+ * `resource`   — resource identifier (for example `"NODE_SEA_BLOB"`).
  * `blob`       — absolute path to the data file to inject.
  * `fuse`       — when set, patches the fuse from `:0` to `:1` after injection.
  * `macho`      — Mach-O specific options; `segment` defaults to `"NODE_SEA"`.
@@ -270,7 +270,7 @@ export interface InjectorInterface {
  * Holds the minimal data needed to create an {@link AssetInterface}.
  *
  * @remarks
- * `key`        — the asset's lookup key (e.g. `"client.html.br"`).
+ * `key`        — the asset's lookup key (for example `"client.html.br"`).
  * `content`    — raw asset bytes.
  * `compressed` — whether `content` is Brotli-compressed. Default: inferred
  * from a `.br` suffix on `key`.
@@ -356,7 +356,7 @@ export type SEAStatus = 'idle' | 'active' | 'done' | 'error'
  * `SIGN`     — code signing failure.
  * `SHELL`    — shell command exited non-zero.
  * `TIMEOUT`  — shell command exceeded its timeout.
- * `ABORT`    — operation aborted via `AbortSignal`.
+ * `ABORT`    — operation aborted through `AbortSignal`.
  * `OUTPUT`   — final executable write/finalize failure.
  * `STATE`    — invalid internal state or argument.
  * `BROWSER`  — invalid or unsupported URL passed to `openBrowser`.
@@ -507,7 +507,7 @@ export interface SEAWindowsSignOptions {
  *
  * @remarks
  * `executable`  — absolute path to the output binary.
- * `platform`    — platform identifier (e.g. `"win32"`, `"darwin"`).
+ * `platform`    — platform identifier (for example `"win32"`, `"darwin"`).
  * `size`        — file size of the executable in bytes.
  * `duration`    — build time in milliseconds.
  * `compression` — compression manifest when directories were compressed.
@@ -532,7 +532,7 @@ export interface SEAResult {
  *
  * @remarks
  * Compresses assets, generates the SEA blob, copies the Node binary,
- * injects the blob via the built-in Injector, and handles platform-specific signing.
+ * injects the blob through the built-in Injector, and handles platform-specific signing.
  */
 export interface SEAInterface {
 	readonly emitter: EmitterInterface<SEAEventMap>

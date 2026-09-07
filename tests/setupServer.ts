@@ -27,8 +27,8 @@ export const WORKSPACE_ROOT = fileURLToPath(resolveRoot(import.meta))
 // === Temp directories
 
 /**
- * Run `fn` with a fresh {@link ScratchInterface} pre-populated with `files`,
- * then destroy it unconditionally — the shared allocate/use/destroy wrapper
+ * Runs `fn` with a fresh {@link ScratchInterface} pre-populated with `files`,
+ * then destroys it unconditionally — the shared allocate/use/destroy wrapper
  * every SEA/injector test repeats. Allocated under the host temp directory —
  * NOT anchored under `WORKSPACE_ROOT`, because a SEA build writes a real
  * executable that must never land in source control.
@@ -58,7 +58,7 @@ export async function withTestDir<T>(
 // === Option builders
 
 /**
- * Build valid {@link SEAOptions} for a test — `name`, `entry`, and `output`
+ * Builds valid {@link SEAOptions} for a test — `name`, `entry`, and `output`
  * default to a minimal working scenario; override any field to exercise a
  * specific case.
  */
@@ -72,7 +72,7 @@ export function createSEAOptions(overrides?: Partial<SEAOptions>): SEAOptions {
 }
 
 /**
- * Build valid {@link InjectorOptions} for a test — `resource` defaults to the
+ * Builds valid {@link InjectorOptions} for a test — `resource` defaults to the
  * standard SEA blob resource name.
  */
 export function createInjectorOptions(options: {
@@ -165,7 +165,7 @@ function buildPeResourceFixtureBytes(sectionVa: number): Buffer {
 }
 
 /**
- * Build a minimal but structurally valid synthetic PE image for Injector
+ * Builds a minimal but structurally valid synthetic PE image for Injector
  * tests — one `.text` section, header slack for a new section entry, and
  * optionally PE32+ magic, a pre-existing `.rsrc` section, or a section table
  * padded until that slack runs out.
@@ -324,7 +324,7 @@ export function buildPeFixture(options?: PeFixtureOptions): Buffer {
 	return buf
 }
 
-/** One parsed PE resource leaf, returned by {@link parsePeResourceLeaves}. */
+/** Holds one parsed PE resource leaf, returned by {@link parsePeResourceLeaves}. */
 export interface PeResourceLeaf {
 	readonly typeId: number
 	readonly typeName: string | undefined
@@ -335,7 +335,7 @@ export interface PeResourceLeaf {
 	readonly data: Buffer
 }
 
-/** One PE section table entry, as {@link walkPeResourceDirectory} reads it. */
+/** Holds one PE section table entry, as {@link walkPeResourceDirectory} reads it. */
 export interface PeSectionInfo {
 	readonly name: string
 	readonly virtualAddress: number
@@ -484,8 +484,8 @@ export function walkPeResourceDirectory(
 }
 
 /**
- * Re-parse a PE resource directory tree from a named section (e.g. the
- * Injector's `.rsrc2` output section) into a flat list of leaves, for
+ * Re-parses a PE resource directory tree from a named section (for example
+ * the Injector's `.rsrc2` output section) into a flat list of leaves, for
  * asserting on injected/preserved resource data after `inject()`.
  */
 export function parsePeResourceLeaves(buf: Buffer, sectionName: string): readonly PeResourceLeaf[] {
@@ -509,7 +509,7 @@ export function parsePeResourceLeaves(buf: Buffer, sectionName: string): readonl
 	return leaves
 }
 
-/** One ELF64 program header entry, built and parsed by the ELF fixture helpers. */
+/** Holds one ELF64 program header entry, built and parsed by the ELF fixture helpers. */
 export interface ElfProgramHeader {
 	readonly type: number
 	readonly flags: number
@@ -533,7 +533,7 @@ function writeElfProgramHeader(buf: Buffer, pos: number, entry: ElfProgramHeader
 }
 
 /**
- * Build a minimal but structurally valid synthetic ELF64 little-endian
+ * Builds a minimal but structurally valid synthetic ELF64 little-endian
  * executable for Injector tests: a PT_PHDR entry plus two PT_LOAD segments,
  * with e_phoff/e_phnum/e_phentsize consistent with the written table.
  */
@@ -603,7 +603,7 @@ export function buildElfFixture(): Buffer {
 	return buf
 }
 
-/** Parse all ELF64 program header entries out of a buffer. */
+/** Parses all ELF64 program header entries out of a buffer. */
 export function parseElfProgramHeaders(buf: Buffer): readonly ElfProgramHeader[] {
 	const phdrOffset = Number(buf.readBigUInt64LE(32))
 	const phdrEntrySize = buf.readUInt16LE(54)
@@ -626,7 +626,7 @@ export function parseElfProgramHeaders(buf: Buffer): readonly ElfProgramHeader[]
 	return headers
 }
 
-/** A parsed, active (non-PT_NULL) ELF note whose name matches a lookup prefix. */
+/** Holds a parsed, active (non-PT_NULL) ELF note whose name matches a lookup prefix. */
 export interface ElfNote {
 	readonly header: ElfProgramHeader
 	readonly name: string
@@ -635,7 +635,7 @@ export interface ElfNote {
 }
 
 /**
- * Find every active PT_NOTE program header whose note name starts with
+ * Finds every active PT_NOTE program header whose note name starts with
  * `namePrefix`, re-parsed from the note's file offset (namesz/descsz/name +
  * 4-byte-aligned descriptor), for asserting on injected ELF note content.
  */
@@ -706,7 +706,7 @@ function writeMachoSectionEntry(buf: Buffer, offset: number, section: MachoSecti
 	buf.writeUInt32LE(0, offset + 76)
 }
 
-/** The `__LINKEDIT` segment {@link buildMachoFixture} emits. */
+/** Configures the `__LINKEDIT` segment {@link buildMachoFixture} emits. */
 export interface MachoLinkeditOptions {
 	/** Emit the `__LINKEDIT` segment command at all. Default: true. */
 	readonly present?: boolean
@@ -726,7 +726,7 @@ export interface MachoFixtureOptions {
 }
 
 /**
- * Build a minimal but structurally valid synthetic thin Mach-O 64 (x86_64)
+ * Builds a minimal but structurally valid synthetic thin Mach-O 64 (x86_64)
  * executable for Injector tests: `__TEXT` (fileoff 0), `__DATA`, `__LINKEDIT`
  * (last), plus an `LC_SYMTAB` and `LC_DYSYMTAB` whose offsets point into
  * `__LINKEDIT` — enough for `#injectMacho` to parse, shift, and inject.
@@ -872,7 +872,7 @@ export function buildMachoFixture(options?: MachoFixtureOptions): Buffer {
 	return buf
 }
 
-/** Build a fat/universal Mach-O header (magic 0xcafebabe) for format-rejection tests. */
+/** Builds a fat/universal Mach-O header (magic 0xcafebabe) for format-rejection tests. */
 export function buildFatMachoFixture(): Buffer {
 	const buf = Buffer.alloc(32)
 	buf.writeUInt32BE(0xcafebabe, 0) // FAT_MAGIC
@@ -880,14 +880,14 @@ export function buildFatMachoFixture(): Buffer {
 	return buf
 }
 
-/** One raw Mach-O load command header (cmd, size, byte offset). */
+/** Holds one raw Mach-O load command header (cmd, size, byte offset). */
 export interface MachoLoadCommand {
 	readonly cmd: number
 	readonly size: number
 	readonly offset: number
 }
 
-/** Parse every load command header out of a Mach-O 64 buffer. */
+/** Parses every load command header out of a Mach-O 64 buffer. */
 export function parseMachoLoadCommands(buf: Buffer): readonly MachoLoadCommand[] {
 	const ncmds = buf.readUInt32LE(16)
 	const commands: MachoLoadCommand[] = []
@@ -901,7 +901,7 @@ export function parseMachoLoadCommands(buf: Buffer): readonly MachoLoadCommand[]
 	return commands
 }
 
-/** One parsed LC_SEGMENT_64 load command. */
+/** Holds one parsed LC_SEGMENT_64 load command. */
 export interface MachoSegment {
 	readonly name: string
 	readonly vmaddr: bigint
@@ -917,7 +917,7 @@ function stripMachoNulls(value: string): string {
 	return idx === -1 ? value : value.slice(0, idx)
 }
 
-/** Parse every LC_SEGMENT_64 command out of a Mach-O 64 buffer. */
+/** Parses every LC_SEGMENT_64 command out of a Mach-O 64 buffer. */
 export function parseMachoSegments(buf: Buffer): readonly MachoSegment[] {
 	return parseMachoLoadCommands(buf)
 		.filter((c) => c.cmd === MACHO_LC_SEGMENT_64)
@@ -932,7 +932,7 @@ export function parseMachoSegments(buf: Buffer): readonly MachoSegment[] {
 		}))
 }
 
-/** One parsed Mach-O section-table entry, found via {@link findMachoSection}. */
+/** Holds one parsed Mach-O section-table entry, found through {@link findMachoSection}. */
 export interface MachoSection {
 	readonly name: string
 	readonly segment: string
@@ -941,7 +941,7 @@ export interface MachoSection {
 	readonly offset: number
 }
 
-/** Find a named section within a named segment in a Mach-O 64 buffer. */
+/** Finds a named section within a named segment in a Mach-O 64 buffer. */
 export function findMachoSection(
 	buf: Buffer,
 	segmentName: string,

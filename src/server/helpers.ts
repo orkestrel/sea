@@ -234,7 +234,7 @@ export function compressFile(
 	})
 
 	// walkDirectory already skips symlinks on the read side; mirror that here
-	// on the write side so a planted symlink at `output` (e.g. `X.br -> /victim`)
+	// on the write side so a planted symlink at `output` (for example `X.br -> /victim`)
 	// cannot redirect this write to an arbitrary file.
 	let outputStat: ReturnType<typeof lstatSync> | undefined
 	try {
@@ -571,8 +571,8 @@ export function patchPESubsystem(path: string, subsystem: number): void {
  * file is truncated to the certificate's start FIRST so the overlay bytes are
  * discarded rather than left as dead weight for a downstream injector to
  * bury mid-file. The directory read is bounds-checked so a malformed or
- * truncated security directory cannot throw unexpectedly — it is simply
- * skipped and only the directory entry is zeroed.
+ * truncated security directory cannot throw unexpectedly — it is skipped
+ * and only the directory entry is zeroed.
  *
  * @param path - Path to the executable
  */
@@ -695,7 +695,7 @@ export function buildSignCommand(sign: SEAWindowsSignOptions, target: string): r
  * Formats a byte count as a human-readable string.
  *
  * @param bytes - Byte count
- * @returns Formatted string (e.g. `"1.23 MB"`, `"456 KB"`)
+ * @returns Formatted string (for example `"1.23 MB"`, `"456 KB"`)
  */
 export function formatSize(bytes: number): string {
 	if (bytes < 1024) return `${String(bytes)} B`
@@ -708,7 +708,7 @@ export function formatSize(bytes: number): string {
  *
  * @remarks
  * Rejects an empty key, an absolute path, a key containing a backslash, a
- * Windows drive-relative specifier (e.g. `'C:foo'`), or any `/`-separated
+ * Windows drive-relative specifier (for example `'C:foo'`), or any `/`-separated
  * segment equal to `'..'` — all of which could escape the intended asset root.
  *
  * @param key - Asset key to validate
@@ -747,10 +747,10 @@ export function ensureSafeKey(key: string): void {
  * Resolves `path` against `base`, then dereferences both the resolved path
  * and `base` with `realpathSync` and requires the real resolved path to
  * equal the real base or begin with the real base plus a path separator.
- * Dereferencing BOTH sides means a symlinked base itself (e.g. macOS `/tmp`
+ * Dereferencing BOTH sides means a symlinked base itself (for example macOS `/tmp`
  * -> `/private/tmp`) still matches, while a symlink inside the tree that
  * points outside the real base is correctly rejected. A `realpathSync`
- * failure (e.g. `ENOENT`) is wrapped as a coded `SEAError` rather than
+ * failure (for example `ENOENT`) is wrapped as a coded `SEAError` rather than
  * leaking the raw Node error.
  *
  * @param base - Absolute path to the containing root
@@ -791,8 +791,8 @@ export function ensureContained(base: string, path: string): string {
  *
  * @remarks
  * Rejects an empty name, `'.'`, `'..'`, a name containing a `/` or `\`
- * separator, an absolute path, or a Windows drive-relative specifier (e.g.
- * `'C:foo'`) — all of which could redirect the output executable outside
+ * separator, an absolute path, or a Windows drive-relative specifier (for
+ * example `'C:foo'`) — all of which could redirect the output executable outside
  * the intended output directory.
  *
  * @param name - Output executable base name to validate
@@ -832,7 +832,7 @@ export function ensureSafeName(name: string): void {
  * platform lacks the primitive, not a failure). Some filesystems/platforms
  * return a benign errno for a directory fsync attempt (`EINVAL`, `ENOTSUP`,
  * `EISDIR`, `EPERM`, `EACCES`) — those are treated as "fsync unsupported
- * here" and swallowed; anything else (e.g. `ENOENT`, meaning the directory
+ * here" and swallowed; anything else (for example `ENOENT`, meaning the directory
  * itself is missing) is a genuine failure and is thrown as a coded `SEAError`.
  *
  * @param path - Directory path to fsync
@@ -861,7 +861,7 @@ export function syncDirectory(path: string): void {
 				? thrown.code
 				: undefined
 		// These codes mean "this filesystem/platform doesn't support directory
-		// fsync" — benign and safe to ignore. Anything else (e.g. ENOENT, the
+		// fsync" — benign and safe to ignore. Anything else (for example ENOENT, the
 		// directory truly doesn't exist) is a genuine failure.
 		if (
 			code === 'EINVAL' ||
@@ -990,7 +990,7 @@ export function alignELFNoteSize(value: number): number {
  * (`strncmp(name, "NODE_SEA", 8)`), so `resource` is written in full but
  * only needs to begin with those 8 bytes to be found at runtime.
  *
- * @param resource - Note name (SEA resource identifier, e.g. `NODE_SEA_BLOB`)
+ * @param resource - Note name (SEA resource identifier, for example `NODE_SEA_BLOB`)
  * @param blobSize - Size in bytes of the SEA blob that will follow the header
  * @returns The note header bytes and the total on-disk size of header + blob
  *
@@ -1158,7 +1158,7 @@ export function patchSentinelFuse(executable: string, fuse: string): void {
  * outlives the host app and never keeps it alive, and it swallows the async
  * host fault an absent opener binary raises. Only `http:` and `https:` URLs
  * are accepted — any other scheme (including a string that merely looks like a
- * CLI flag, e.g. `'-e ...'`) fails to parse as an http(s) URL and is rejected
+ * CLI flag, for example `'-e ...'`) fails to parse as an http(s) URL and is rejected
  * before anything is spawned.
  *
  * @param url - Absolute http or https URL to open
