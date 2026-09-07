@@ -56,7 +56,7 @@ export function resolvePlatform(platform?: string): SEAPlatform | undefined {
 }
 
 /**
- * Checks if the current or specified platform is supported for SEA builds.
+ * Checks whether the current or named platform is supported for SEA builds.
  *
  * @param platform - Platform identifier to check
  * @returns True if the platform has a known configuration; false otherwise
@@ -94,7 +94,8 @@ export function isCompressible(path: string): boolean {
 }
 
 /**
- * Walks a directory recursively and returns all file paths.
+ * Walks a directory recursively and returns every file path it finds, relative to
+ * the base and skipping symlinks.
  *
  * @param directory - Directory to walk
  * @param base - Base directory for relative path calculation
@@ -126,7 +127,8 @@ export function walkDirectory(directory: string, base?: string): readonly string
 // === Shell Helpers
 
 /**
- * Redacts password arguments from a shell command.
+ * Redacts password arguments from a shell command, so the command is safe to
+ * include in an error message.
  *
  * @param command - Command arguments to redact
  * @returns A copy with values following password flags replaced by a marker
@@ -445,7 +447,7 @@ export function appendFile(target: string, source: string, chunk = 4 * 1024 * 10
 }
 
 /**
- * Truncates a string at its first NUL character.
+ * Truncates a NUL-padded binary name field at its first NUL character.
  *
  * @remarks
  * Binary name fields (PE section names, Mach-O segment and section names, ELF
@@ -524,7 +526,7 @@ export function writeU16(fd: number, offset: number, value: number): void {
 }
 
 /**
- * Checks if a file is a Windows PE executable.
+ * Checks whether a file is a Windows PE executable.
  *
  * @param path - Path to the file
  * @returns True if the file has a valid PE signature; false otherwise
@@ -1078,10 +1080,11 @@ export function copyRange(
 /**
  * Patches the sentinel fuse in a binary from `:0` to `:1`.
  *
- * Searches the file in 64 MB chunks with overlap to handle any file size.
- * The fuse signals to the Node.js runtime that a SEA blob is present.
- * This is normally handled by the Injector but is also available standalone
- * when using native PE resource injection.
+ * @remarks
+ * Searches the file in 64 MB chunks with overlap to handle any file size. The fuse
+ * signals to the Node.js runtime that a SEA blob is present. The `Injector` class
+ * normally applies this patch, and it stays available standalone for a build that
+ * injects the PE resource natively instead.
  *
  * @param executable - Absolute path to the executable
  * @param fuse - Sentinel fuse string (without the `:0` suffix)

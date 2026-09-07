@@ -1,9 +1,13 @@
 # @orkestrel/sea
 
-A pure-TypeScript Node.js [Single Executable Application (SEA)](https://nodejs.org/api/single-executable-applications.html)
-builder for the `@orkestrel` line — compress assets, assemble the SEA blob,
-and inject it into a standalone binary, entirely in TypeScript with no
-external tools.
+> The Node.js single executable application (SEA) builder: a pure-TypeScript pipeline
+> that compresses assets, assembles the SEA blob, injects it into a copy of the host
+> Node binary, and signs the result, with no WASM and no external tools.
+
+Build a [Single Executable Application](https://nodejs.org/api/single-executable-applications.html)
+with the `createSEA` function: point it at your entry script and an output
+directory, then `await sea.execute()` for the finished binary. Part of the
+`@orkestrel` line.
 
 ## Install
 

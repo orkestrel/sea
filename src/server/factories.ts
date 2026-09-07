@@ -14,21 +14,30 @@ import { Asset } from './assets/Asset.js'
 import { AssetManager } from './assets/AssetManager.js'
 
 /**
- * Creates a new SEA build orchestrator.
+ * Creates a SEA build orchestrator over the given options and returns it as a
+ * `SEAInterface`, the published contract a caller holds instead of the `SEA` class.
  *
  * @param options - SEA build options
  * @returns a new `SEAInterface`
  *
- * @example
+ * @example Build a single executable
  * ```ts
+ * import { createSEA, formatSize } from '@orkestrel/sea'
+ *
  * const sea = createSEA({
- *     name: 'orkestrel',
- *     entry: { path: 'dist/bin/serve.cjs' },
- *     output: 'dist/sea',
- *     assets: { 'index.html.br': 'dist/client/index.html.br' },
- *     compression: { paths: ['dist/client'] },
+ * 	name: 'myapp',
+ * 	entry: { path: 'dist/server/serve.cjs' },
+ * 	output: 'dist/sea',
+ * 	assets: { 'model.gguf': 'models/model.gguf' },
+ * 	compression: { paths: ['dist/app/browser'], mode: 'text' },
+ * 	windows: { terminal: false },
+ * 	timeout: 30_000,
  * })
+ *
  * const result = await sea.execute()
+ * process.stdout.write(
+ * 	`${result.executable} ${formatSize(result.size)} ${String(result.duration)}ms\n`,
+ * )
  * ```
  */
 export function createSEA(options: SEAOptions): SEAInterface {
@@ -36,11 +45,13 @@ export function createSEA(options: SEAOptions): SEAInterface {
 }
 
 /**
- * Creates a cross-platform binary resource injector.
+ * Creates a resource injector bound to one target executable and returns it as an
+ * `InjectorInterface`, with the executable's format already detected from its header.
  *
- * Detects the executable format (PE, ELF, Mach-O) from the file header
- * and injects the blob using pure TypeScript file I/O — no WASM, no
- * external tools.
+ * @remarks
+ * The format detected at construction — PE, ELF, or Mach-O — selects the strategy
+ * `inject` takes. Every write runs through pure TypeScript file I/O, so the injector
+ * needs no WASM and no external tool.
  *
  * @param options - Injector options
  * @returns a new `InjectorInterface`
@@ -61,7 +72,9 @@ export function createInjector(options: InjectorOptions): InjectorInterface {
 }
 
 /**
- * Creates a single named asset.
+ * Creates one named asset from a key and a content buffer and returns it as an
+ * `AssetInterface`, with `compressed` inferred from the key where the input leaves
+ * it unset.
  *
  * @param input - Asset key, content, and optional compression flag
  * @returns a new `AssetInterface`
@@ -76,7 +89,8 @@ export function createAsset(input: AssetInput): AssetInterface {
 }
 
 /**
- * Creates an asset manager for SEA-embedded or disk-loaded assets.
+ * Creates an asset collection and returns it as an `AssetManagerInterface`, already
+ * carrying whatever assets the running SEA blob embeds.
  *
  * @param options - Asset manager options (root, event hooks)
  * @returns a new `AssetManagerInterface`

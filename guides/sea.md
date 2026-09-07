@@ -1,8 +1,15 @@
 # SEA — Single Executable Application Builder
 
-> Node.js SEA builder — compress, blob, assemble, sign, and embed assets into a standalone binary. Pure TypeScript, no WASM, no external tools. Source: [`src/server`](../src/server). Surfaced through the `@orkestrel/sea` barrel.
+> The Node.js single executable application (SEA) builder: a pure-TypeScript pipeline
+> that compresses assets, assembles the SEA blob, injects it into a copy of the host
+> Node binary, and signs the result, with no WASM and no external tools.
+
+Every export named here reaches a consumer through the `@orkestrel/sea` barrel, and its
+source sits under [`src/server`](../src/server).
 
 ## Overview
+
+### Build a single executable
 
 ```ts
 import { createSEA, formatSize } from '@orkestrel/sea'
@@ -29,7 +36,7 @@ When an `assets` path is compressed by `compression`, blob generation embeds the
 
 On Windows, `SEAOptions.windows.terminal` (default `true`) selects whether the executable keeps its console window: `false` builds a GUI-subsystem binary that launches without a terminal, at the cost of detached stdio when no console is attached (console output is discarded).
 
-On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When present, the assembled executable is signed with `signtool` (cert `file` + `password`, or a store `thumbprint` — exactly one of the two) and verified as the LAST content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`). `buildSignCommand` builds the `signtool` argv and is available standalone.
+On Windows, `SEAOptions.windows.sign` is optional Authenticode signing. When present, the assembled executable is signed with `signtool` (a certificate `file` with its `password`, or a store `thumbprint` — exactly one of those) and verified as the last content mutation before the atomic finalize; when absent, the output stays unsigned (`SEAResult.signed` is `false`). `buildSignCommand` builds the `signtool` argv and is available standalone.
 
 `SEAOptions.entry` is a `SEAEntryOptions` object (`{ path, format? }`) rather than a bare path — `format` selects the entry module format (`'cjs'` default, or `'esm'` on Node >= 25.7). Every domain failure throws a `SEAError` carrying a machine-readable `SEAErrorCode`; narrow a caught value with `isSEAError`. `SEAResult` additionally reports `signed`, `stripped`, and the patched `terminal` flag (Windows only).
 
@@ -39,183 +46,187 @@ On Windows, `SEAOptions.windows.sign` is OPTIONAL Authenticode signing. When pre
 
 ## Surface
 
-### Entities
+### Classes
 
-| API            | Kind  | Summary                                                                                           |
-| -------------- | ----- | ------------------------------------------------------------------------------------------------- |
-| `SEA`          | class | Build orchestrator — `execute` runs compress → blob → assemble; `destroy` tears down the emitter. |
-| `Injector`     | class | Cross-platform binary resource injector (PE / ELF / Mach-O) — `inject` writes the resource.       |
-| `Asset`        | class | A single named asset — `key` / `content` / `compressed`.                                          |
-| `AssetManager` | class | Collection of embedded or disk-loaded assets — `register` / `load` / `asset` / `assets` / `keys`. |
+| API            | Kind  | Summary                                                                    |
+| -------------- | ----- | -------------------------------------------------------------------------- |
+| `SEA`          | class | Runs a Node.js single executable application build to completion.          |
+| `Injector`     | class | Writes a named resource into a PE, ELF, or Mach-O executable in place.     |
+| `Asset`        | class | Holds one named asset's key, bytes, and compression state.                 |
+| `AssetManager` | class | Collects named assets from a SEA blob or from disk and serves them by key. |
 
 ### Factories
 
-| API                  | Kind     | Summary                                                         |
-| -------------------- | -------- | --------------------------------------------------------------- |
-| `createSEA`          | function | Create a new SEA build orchestrator.                            |
-| `createInjector`     | function | Create a cross-platform binary resource injector.               |
-| `createAsset`        | function | Create a single named asset.                                    |
-| `createAssetManager` | function | Create an asset manager for SEA-embedded or disk-loaded assets. |
+| API                  | Kind     | Summary                                                                                                                                                                 |
+| -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createSEA`          | function | Creates a SEA build orchestrator over the given options and returns it as a `SEAInterface`, the published contract a caller holds instead of the `SEA` class.           |
+| `createInjector`     | function | Creates a resource injector bound to one target executable and returns it as an `InjectorInterface`, with the executable's format already detected from its header.     |
+| `createAsset`        | function | Creates one named asset from a key and a content buffer and returns it as an `AssetInterface`, with `compressed` inferred from the key where the input leaves it unset. |
+| `createAssetManager` | function | Creates an asset collection and returns it as an `AssetManagerInterface`, already carrying whatever assets the running SEA blob embeds.                                 |
 
 ### Constants
 
-| API                               | Kind  | Summary                                                                     |
-| --------------------------------- | ----- | --------------------------------------------------------------------------- |
-| `SEA_SENTINEL_FUSE`               | const | SEA sentinel fuse value embedded in the Node.js binary.                     |
-| `SEA_BLOB_RESOURCE`               | const | Resource name for the SEA blob in the executable.                           |
-| `DEFAULT_SEA_COMPRESSION_QUALITY` | const | Default Brotli compression quality level (maximum).                         |
-| `WINDOWS_SUBSYSTEM_GUI`           | const | Windows PE subsystem value: GUI application (no terminal window).           |
-| `WINDOWS_SUBSYSTEM_CONSOLE`       | const | Windows PE subsystem value: console application.                            |
-| `BROTLI_EXTENSION`                | const | File extension indicating Brotli compression.                               |
-| `SKIP_EXTENSIONS`                 | const | File extensions Brotli compression skips.                                   |
-| `PE_MAGIC`                        | const | DOS MZ header magic (first 2 bytes of a PE file).                           |
-| `PE_SIGNATURE`                    | const | PE signature: "PE\0\0" as a 32-bit value.                                   |
-| `PE32_MAGIC`                      | const | PE32 optional header magic.                                                 |
-| `PE32_PLUS_MAGIC`                 | const | PE32+ (64-bit) optional header magic.                                       |
-| `ELF_MAGIC`                       | const | ELF magic: 0x7F 'E' 'L' 'F' as a 32-bit big-endian value.                   |
-| `ELF_CLASS_64`                    | const | ELF 64-bit class identifier.                                                |
-| `ELF_DATA_LSB`                    | const | ELF little-endian data encoding.                                            |
-| `ELF_PT_NOTE`                     | const | ELF program header type: note segment.                                      |
-| `ELF_PT_LOAD`                     | const | ELF program header type: loadable segment.                                  |
-| `ELF_PT_PHDR`                     | const | ELF program header type: the program header table itself.                   |
-| `ELF_PF_R`                        | const | ELF segment permission flag marking a segment readable.                     |
-| `ELF_PAGE_SIZE`                   | const | Page size an injected ELF segment is aligned to.                            |
-| `MACHO_MAGIC_64`                  | const | Mach-O 64-bit magic (little-endian).                                        |
-| `MACHO_LC_SEGMENT_64`             | const | Mach-O LC_SEGMENT_64 load command.                                          |
-| `PE_RT_RCDATA`                    | const | PE resource type: RT_RCDATA (raw data).                                     |
-| `PE_RESOURCE_DIR_SIZE`            | const | Size of IMAGE_RESOURCE_DIRECTORY in bytes.                                  |
-| `PE_RESOURCE_ENTRY_SIZE`          | const | Size of IMAGE_RESOURCE_DIRECTORY_ENTRY in bytes.                            |
-| `PE_RESOURCE_DATA_ENTRY_SIZE`     | const | Size of IMAGE_RESOURCE_DATA_ENTRY in bytes.                                 |
-| `PE_SECTION_HEADER_SIZE`          | const | PE section header size in bytes.                                            |
-| `PE_RESOURCE_SUBDIR_FLAG`         | const | High bit mask for resource directory entry offset (indicates subdirectory). |
-| `PE_RESOURCE_NAME_FLAG`           | const | High bit mask for resource name entry (indicates named vs integer ID).      |
-| `PE_SCN_INITIALIZED_DATA`         | const | Section contains initialized data.                                          |
-| `PE_SCN_MEM_READ`                 | const | Section is readable.                                                        |
-| `SEA_PLATFORMS`                   | const | Platform-specific SEA build configurations.                                 |
-| `SEA_COMPRESSION_MODE_VALUES`     | const | Maps a `SEACompressionMode` to its numeric Brotli mode value.               |
-| `DEFAULT_ENTRY_FORMAT`            | const | Default SEA entry point module format when none is specified.               |
+A `Shape` cell holds the constant's declared type.
+
+| API                               | Kind  | Shape                                          | Summary                                                                                                               |
+| --------------------------------- | ----- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `SEA_SENTINEL_FUSE`               | const | `string`                                       | Holds the SEA sentinel fuse value embedded in the Node.js binary, `NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`.   |
+| `SEA_BLOB_RESOURCE`               | const | `string`                                       | Names the SEA blob resource in the executable, `NODE_SEA_BLOB`.                                                       |
+| `DEFAULT_SEA_COMPRESSION_QUALITY` | const | `number`                                       | Holds the default Brotli compression quality level, 11, the maximum Brotli accepts.                                   |
+| `WINDOWS_SUBSYSTEM_GUI`           | const | `number`                                       | Holds the Windows PE subsystem value for a GUI application, 2, which launches without a terminal window.              |
+| `WINDOWS_SUBSYSTEM_CONSOLE`       | const | `number`                                       | Holds the Windows PE subsystem value for a console application, 3.                                                    |
+| `BROTLI_EXTENSION`                | const | `string`                                       | Names the file extension indicating Brotli compression, `.br`.                                                        |
+| `SKIP_EXTENSIONS`                 | const | `ReadonlySet<string>`                          | Lists the file extensions Brotli compression skips, the already-compressed archive, image, font, and media formats.   |
+| `PE_MAGIC`                        | const | `number`                                       | Holds the DOS MZ header magic, 0x5a4d, the first two bytes of a PE file.                                              |
+| `PE_SIGNATURE`                    | const | `number`                                       | Holds the PE signature, 0x00004550, the bytes `PE\0\0` read as a 32-bit value.                                        |
+| `PE32_MAGIC`                      | const | `number`                                       | Holds the PE32 optional header magic, 0x10b.                                                                          |
+| `PE32_PLUS_MAGIC`                 | const | `number`                                       | Holds the PE32+ optional header magic, 0x20b, the 64-bit form.                                                        |
+| `ELF_MAGIC`                       | const | `number`                                       | Holds the ELF magic, 0x7f454c46, the bytes 0x7F `E` `L` `F` read as a 32-bit big-endian value.                        |
+| `ELF_CLASS_64`                    | const | `number`                                       | Holds the ELF 64-bit class identifier, 2.                                                                             |
+| `ELF_DATA_LSB`                    | const | `number`                                       | Holds the ELF little-endian data encoding, 1.                                                                         |
+| `ELF_PT_NOTE`                     | const | `number`                                       | Holds the ELF program header type for a note segment, 4.                                                              |
+| `ELF_PT_LOAD`                     | const | `number`                                       | Holds the ELF program header type for a loadable segment, 1.                                                          |
+| `ELF_PT_PHDR`                     | const | `number`                                       | Holds the ELF program header type for the program header table itself, 6.                                             |
+| `ELF_PF_R`                        | const | `number`                                       | Holds the ELF segment permission flag marking a segment readable, 4.                                                  |
+| `ELF_PAGE_SIZE`                   | const | `number`                                       | Holds the page size an injected ELF segment is aligned to, 0x1000.                                                    |
+| `MACHO_MAGIC_64`                  | const | `number`                                       | Holds the Mach-O 64-bit magic, 0xfeedfacf, in little-endian byte order.                                               |
+| `MACHO_LC_SEGMENT_64`             | const | `number`                                       | Holds the Mach-O `LC_SEGMENT_64` load command, 0x19.                                                                  |
+| `PE_RT_RCDATA`                    | const | `number`                                       | Holds the PE resource type `RT_RCDATA` for raw data, 10.                                                              |
+| `PE_RESOURCE_DIR_SIZE`            | const | `number`                                       | Holds the size of `IMAGE_RESOURCE_DIRECTORY` in bytes, 16.                                                            |
+| `PE_RESOURCE_ENTRY_SIZE`          | const | `number`                                       | Holds the size of `IMAGE_RESOURCE_DIRECTORY_ENTRY` in bytes, 8.                                                       |
+| `PE_RESOURCE_DATA_ENTRY_SIZE`     | const | `number`                                       | Holds the size of `IMAGE_RESOURCE_DATA_ENTRY` in bytes, 16.                                                           |
+| `PE_SECTION_HEADER_SIZE`          | const | `number`                                       | Holds the PE section header size in bytes, 40.                                                                        |
+| `PE_RESOURCE_SUBDIR_FLAG`         | const | `number`                                       | Holds the high bit mask marking a resource directory entry offset as a subdirectory, 0x80000000.                      |
+| `PE_RESOURCE_NAME_FLAG`           | const | `number`                                       | Holds the high bit mask marking a resource entry as named rather than integer-identified, 0x80000000.                 |
+| `PE_SCN_INITIALIZED_DATA`         | const | `number`                                       | Marks a section as containing initialized data, 0x00000040.                                                           |
+| `PE_SCN_MEM_READ`                 | const | `number`                                       | Marks a section as readable, 0x40000000.                                                                              |
+| `SEA_PLATFORMS`                   | const | `Readonly<Record<string, SEAPlatform>>`        | Holds the platform-specific SEA build configurations, keyed by `process.platform` for `win32`, `darwin`, and `linux`. |
+| `SEA_COMPRESSION_MODE_VALUES`     | const | `Readonly<Record<SEACompressionMode, number>>` | Maps a `SEACompressionMode` to its numeric Brotli mode value: `generic` to 0, `text` to 1, and `font` to 2.           |
+| `DEFAULT_ENTRY_FORMAT`            | const | `SEAEntryFormat`                               | Names the default SEA entry point module format when none is specified, `cjs`.                                        |
 
 ### Helpers and errors
 
-| API                   | Kind     | Summary                                                                         |
-| --------------------- | -------- | ------------------------------------------------------------------------------- |
-| `isExecutableFormat`  | function | Check if a value is a valid `ExecutableFormat`.                                 |
-| `resolvePlatform`     | function | Resolve the effective platform configuration.                                   |
-| `isPlatformSupported` | function | Check if the current or specified platform is supported for SEA builds.         |
-| `ensureExists`        | function | Assert that a path exists, throwing with a descriptive message if not.          |
-| `isCompressible`      | function | Check whether a file's extension is outside `SKIP_EXTENSIONS`.                  |
-| `walkDirectory`       | function | Recursively walk a directory and return all file paths.                         |
-| `executeShell`        | function | Execute a command synchronously and return stdout; throws `ShellError`.         |
-| `redactCommand`       | function | Redact a shell command's arguments for safe inclusion in error messages.        |
-| `computeSize`         | function | Compute a size comparison between original and compressed byte counts.          |
-| `compressFile`        | function | Brotli-compress a single file, writing the output alongside it.                 |
-| `compressDirectory`   | function | Compress all compressible files in a directory tree.                            |
-| `alignTo`             | function | Round a value up to the next multiple of an alignment boundary.                 |
-| `readPEOffset`        | function | Read the PE header offset from a Windows executable.                            |
-| `readU16`             | function | Read a 16-bit unsigned integer from a file descriptor.                          |
-| `readU32`             | function | Read a 32-bit unsigned little-endian integer from a file descriptor.            |
-| `readU64`             | function | Read a 64-bit unsigned little-endian integer from a file descriptor.            |
-| `writeU16`            | function | Write a 16-bit unsigned integer to a file descriptor.                           |
-| `writeU32`            | function | Write a 32-bit unsigned little-endian integer to a file descriptor.             |
-| `writeU64`            | function | Write a 64-bit unsigned little-endian integer to a file descriptor.             |
-| `appendFile`          | function | Append a source file to a target file, streaming in fixed-size chunks.          |
-| `stripTrailingNulls`  | function | Truncate a NUL-padded binary name field at its first NUL character.             |
-| `isPEExecutable`      | function | Check if a file is a Windows PE executable.                                     |
-| `patchPESubsystem`    | function | Patch the PE subsystem field in a Windows executable.                           |
-| `stripPESignature`    | function | Remove the Authenticode signature from a PE executable.                         |
-| `buildSignCommand`    | function | Build the `signtool sign` argv for signing a Windows executable.                |
-| `formatSize`          | function | Format a byte count as a human-readable string.                                 |
-| `ensureSafeKey`       | function | Assert that an asset key is safe to use as a relative filesystem key.           |
-| `ensureContained`     | function | Assert a path real-path-resolves inside a base root (blocks symlink escape).    |
-| `ensureSafeName`      | function | Assert that a name is a single safe path segment (output executable base name). |
-| `finalizeExecutable`  | function | Durably flush and atomically move a built executable into place.                |
-| `syncDirectory`       | function | Fsync a directory to durably persist a prior file rename/create within it.      |
-| `buildBlobConfig`     | function | Build the `--experimental-sea-config` JSON object for a SEA blob.               |
-| `patchSentinelFuse`   | function | Patch the sentinel fuse in a binary from `:0` to `:1`.                          |
-| `buildELFNoteHeader`  | function | Build an ELF `PT_NOTE` entry's header bytes for the SEA blob note.              |
-| `alignELFNoteSize`    | function | Round an ELF note payload size up to its four-byte alignment boundary.          |
-| `isPowerOfTwo`        | function | Whether a positive integer is an exact power of two.                            |
-| `copyRange`           | function | Stream a byte range between two file descriptors in fixed-size chunks.          |
-| `openBrowser`         | function | Launch the system default browser at an http(s) URL.                            |
-| `SEAError`            | class    | The coded base error for every failure raised by the SEA build.                 |
-| `isSEAError`          | function | Whether a value is a `SEAError`.                                                |
-| `ShellError`          | class    | Error `executeShell` throws when a command exits non-zero.                      |
-| `isShellError`        | function | Whether a value is a `ShellError`.                                              |
+| API                   | Kind     | Summary                                                                                                                                      |
+| --------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isExecutableFormat`  | function | Checks whether a value is a valid `ExecutableFormat`.                                                                                        |
+| `resolvePlatform`     | function | Resolves the effective platform configuration.                                                                                               |
+| `isPlatformSupported` | function | Checks whether the current or named platform is supported for SEA builds.                                                                    |
+| `ensureExists`        | function | Asserts that a path exists, throwing a coded `SEAError` if not.                                                                              |
+| `isCompressible`      | function | Checks whether a file's extension is outside `SKIP_EXTENSIONS`, so Brotli compression applies to it.                                         |
+| `walkDirectory`       | function | Walks a directory recursively and returns every file path it finds, relative to the base and skipping symlinks.                              |
+| `executeShell`        | function | Executes a command synchronously and returns stdout.                                                                                         |
+| `redactCommand`       | function | Redacts password arguments from a shell command, so the command is safe to include in an error message.                                      |
+| `computeSize`         | function | Computes a size comparison between original and compressed byte counts.                                                                      |
+| `compressFile`        | function | Brotli-compresses a single file, writing the output alongside it.                                                                            |
+| `compressDirectory`   | function | Compresses all compressible files in a directory tree.                                                                                       |
+| `alignTo`             | function | Rounds a value up to the next multiple of an alignment boundary.                                                                             |
+| `readPEOffset`        | function | Reads the PE header offset from a Windows executable.                                                                                        |
+| `readU16`             | function | Reads a 16-bit unsigned integer from a file descriptor.                                                                                      |
+| `readU32`             | function | Reads a 32-bit unsigned little-endian integer from a file descriptor.                                                                        |
+| `readU64`             | function | Reads a 64-bit unsigned little-endian integer from a file descriptor.                                                                        |
+| `writeU16`            | function | Writes a 16-bit unsigned integer to a file descriptor.                                                                                       |
+| `writeU32`            | function | Writes a 32-bit unsigned little-endian integer to a file descriptor.                                                                         |
+| `writeU64`            | function | Writes a 64-bit unsigned little-endian integer to a file descriptor.                                                                         |
+| `appendFile`          | function | Appends a source file to a target file, streaming in fixed-size chunks.                                                                      |
+| `stripTrailingNulls`  | function | Truncates a NUL-padded binary name field at its first NUL character.                                                                         |
+| `isPEExecutable`      | function | Checks whether a file is a Windows PE executable.                                                                                            |
+| `patchPESubsystem`    | function | Patches the PE subsystem field in a Windows executable.                                                                                      |
+| `stripPESignature`    | function | Removes the Authenticode signature from a PE executable by zeroing the security directory entry in the optional header.                      |
+| `buildSignCommand`    | function | Builds the `signtool sign` argv for signing a Windows executable.                                                                            |
+| `formatSize`          | function | Formats a byte count as a human-readable string.                                                                                             |
+| `ensureSafeKey`       | function | Asserts that an asset key is safe to use as a relative filesystem/archive key.                                                               |
+| `ensureContained`     | function | Asserts that `path` (resolved against `base`) real-path-resolves to a location inside `base`, defeating a symlink escape.                    |
+| `ensureSafeName`      | function | Asserts that `name` is a single safe path segment suitable as an output executable base name.                                                |
+| `finalizeExecutable`  | function | Finalizes a built executable by durably flushing it to disk and atomically moving it into place.                                             |
+| `syncDirectory`       | function | Fsyncs a directory to durably persist a prior file rename/create within it.                                                                  |
+| `buildBlobConfig`     | function | Builds the Node.js `--experimental-sea-config` JSON object for a SEA blob.                                                                   |
+| `patchSentinelFuse`   | function | Patches the sentinel fuse in a binary from `:0` to `:1`.                                                                                     |
+| `buildELFNoteHeader`  | function | Builds an ELF `PT_NOTE` entry's header bytes (namesz/descsz/type + padded name) for the SEA blob note, without the blob body itself.         |
+| `alignELFNoteSize`    | function | Aligns an ELF note component size to its four-byte boundary.                                                                                 |
+| `isPowerOfTwo`        | function | Checks whether a number is a nonzero power of two.                                                                                           |
+| `copyRange`           | function | Copies a byte range from one open file descriptor to another, streaming in fixed-size chunks instead of buffering the whole range in memory. |
+| `openBrowser`         | function | Launches the system default browser at an http(s) URL.                                                                                       |
+| `SEAError`            | class    | Represents the coded base error for every failure raised by the SEA build.                                                                   |
+| `isSEAError`          | function | Checks whether a value is a `SEAError`.                                                                                                      |
+| `ShellError`          | class    | Represents an error thrown when a shell command executed through `executeShell` exits non-zero.                                              |
+| `isShellError`        | function | Checks whether a value is a `ShellError`.                                                                                                    |
 
 ### Types
 
-| API                      | Kind      | Summary                                                                      |
-| ------------------------ | --------- | ---------------------------------------------------------------------------- |
-| `SEACompressionSize`     | interface | Size comparison between original and compressed data.                        |
-| `SEACompressionMode`     | type      | Brotli compression mode (`generic` / `text` / `font`).                       |
-| `SEACompressionResult`   | interface | Result of compressing a single file.                                         |
-| `SEACompressionManifest` | interface | Manifest summarizing all compressed assets.                                  |
-| `SEAProgress`            | interface | Progress reported while compressing a directory (`path`/`current`/`total`).  |
-| `SEACompressionHandler`  | type      | Callback `compressDirectory` invokes after each file it compresses.          |
-| `SEABrotliOptions`       | interface | Options controlling how Brotli encodes one file (`mode` / `quality`).        |
-| `SEACompressionOptions`  | interface | Options controlling Brotli compression of one or more directories.           |
-| `SEAPlatform`            | interface | Platform-specific SEA build configuration.                                   |
-| `SEAShellOptions`        | interface | Options for executing a shell command.                                       |
-| `ExecutableFormat`       | type      | Executable binary format detected from file header magic bytes.              |
-| `ELFNoteHeader`          | interface | An ELF `PT_NOTE` entry's header bytes and the entry's on-disk size.          |
-| `ELFProgramHeader`       | interface | One ELF64 program header entry, transliterating `Elf64_Phdr`.                |
-| `PEResourceLeaf`         | interface | One leaf of a PE resource directory tree, with its data entry.               |
-| `PEResourceEntry`        | interface | One language entry of a PE resource name directory.                          |
-| `PESection`              | interface | One PE section table entry, with the file offset it was read from.           |
-| `InjectorOptions`        | interface | Options for injecting a resource into an executable.                         |
-| `InjectorMachOOptions`   | interface | Mach-O specific injector options.                                            |
-| `InjectorInterface`      | interface | Cross-platform binary resource injector contract.                            |
-| `AssetInput`             | interface | Minimal data needed to create an `AssetInterface`.                           |
-| `AssetInterface`         | interface | A single named asset wrapping its key, content buffer, and compression flag. |
-| `AssetManagerEventMap`   | type      | Events emitted by an `AssetManagerInterface`.                                |
-| `AssetManagerOptions`    | interface | Options for creating an `AssetManagerInterface`.                             |
-| `AssetManagerInterface`  | interface | Named asset collection with SEA and disk loading.                            |
-| `SEAStatus`              | type      | Overall status of the SEA build.                                             |
-| `SEAErrorCode`           | type      | Machine-readable error code carried by every `SEAError`.                     |
-| `SEAEntryFormat`         | type      | SEA entry point module format (`cjs` / `esm`).                               |
-| `SEAEntryOptions`        | interface | Options describing the SEA entry point (path and module format).             |
-| `SEABlobOptions`         | interface | Options controlling generated SEA blob behavior (cache, snapshot).           |
-| `SEAEventMap`            | type      | Events emitted by a `SEAInterface`.                                          |
-| `SEAOptions`             | interface | Options for creating a SEA build, including a per-command timeout.           |
-| `SEAWindowsOptions`      | interface | Windows-specific SEA build options.                                          |
-| `SEAWindowsSignOptions`  | interface | Windows Authenticode signing options, passed through to `signtool`.          |
-| `SEAResult`              | interface | Result of a successful SEA build (adds `signed`, `stripped`, `terminal`).    |
-| `SEAInterface`           | interface | SEA build orchestrator contract.                                             |
+A `Shape` cell holds an interface's data members as bare names in braces, `?` marking an optional member and `plus` introducing its call-signature members, and a type alias's own type literal with a union's arms escaped as `\|`.
+
+| API                      | Kind      | Shape                                                                                                                                                                     | Summary                                                                                 |
+| ------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `SEACompressionSize`     | interface | `{ original, compressed, ratio }`                                                                                                                                         | Represents a size comparison between original and compressed data.                      |
+| `SEACompressionMode`     | type      | `'generic' \| 'text' \| 'font'`                                                                                                                                           | Names a Brotli compression mode.                                                        |
+| `SEACompressionResult`   | interface | `{ input, output, size }`                                                                                                                                                 | Represents the result of compressing a single file.                                     |
+| `SEACompressionManifest` | interface | `{ assets, total }`                                                                                                                                                       | Summarizes all compressed assets.                                                       |
+| `SEAProgress`            | interface | `{ path, current, total }`                                                                                                                                                | Represents the progress reported while compressing a directory.                         |
+| `SEACompressionHandler`  | type      | `(result: SEACompressionResult) => void`                                                                                                                                  | Describes the callback `compressDirectory` invokes after each file it compresses.       |
+| `SEABrotliOptions`       | interface | `{ mode?, quality? }`                                                                                                                                                     | Controls how Brotli encodes one file.                                                   |
+| `SEACompressionOptions`  | interface | `{ paths, mode?, quality? }`                                                                                                                                              | Controls Brotli compression of one or more directories.                                 |
+| `SEAPlatform`            | interface | `{ executable, remove?, sign?, verify? }`                                                                                                                                 | Represents a platform-specific SEA build configuration.                                 |
+| `SEAShellOptions`        | interface | `{ cwd?, env?, timeout?, signal? }`                                                                                                                                       | Configures the execution of a shell command.                                            |
+| `ExecutableFormat`       | type      | `'pe' \| 'elf' \| 'macho'`                                                                                                                                                | Names an executable binary format detected from file header magic bytes.                |
+| `ELFNoteHeader`          | interface | `{ header, total }`                                                                                                                                                       | Holds an ELF `PT_NOTE` entry's header bytes and the on-disk size of the whole entry.    |
+| `ELFProgramHeader`       | interface | `{ type, flags, offset, vaddr, paddr, filesz, memsz, align }`                                                                                                             | Holds one ELF64 program header entry.                                                   |
+| `PEResourceLeaf`         | interface | `{ typeId, typeName, nameId, nameName, language, codePage, dataRVA, dataSize }`                                                                                           | Holds one leaf of a PE resource directory tree.                                         |
+| `PEResourceEntry`        | interface | `{ language, codePage, leafIndex, dataSize }`                                                                                                                             | Holds one language entry of a PE resource name directory.                               |
+| `PESection`              | interface | `{ name, virtualSize, virtualAddress, rawSize, rawOffset, characteristics, headerOffset }`                                                                                | Holds one PE section table entry.                                                       |
+| `InjectorOptions`        | interface | `{ executable, resource, blob, fuse?, macho?, overwrite? }`                                                                                                               | Configures the injection of a resource into an executable.                              |
+| `InjectorMachOOptions`   | interface | `{ segment? }`                                                                                                                                                            | Configures Mach-O specific injector behavior.                                           |
+| `InjectorInterface`      | interface | `{ format } plus inject`                                                                                                                                                  | Represents a cross-platform binary resource injector.                                   |
+| `AssetInput`             | interface | `{ key, content, compressed? }`                                                                                                                                           | Holds the minimal data needed to create an `AssetInterface`.                            |
+| `AssetInterface`         | interface | `{ key, content, compressed }`                                                                                                                                            | Represents a single named asset wrapping its key, content buffer, and compression flag. |
+| `AssetManagerEventMap`   | type      | `{ register, load, clear, error }`                                                                                                                                        | Lists the events emitted by an `AssetManagerInterface`.                                 |
+| `AssetManagerOptions`    | interface | `{ on?, error?, root?, assets? }`                                                                                                                                         | Configures the creation of an `AssetManagerInterface`.                                  |
+| `AssetManagerInterface`  | interface | `{ emitter, count } plus asset, assets, keys, register, load, clear, destroy`                                                                                             | Represents a named asset collection with SEA and disk loading.                          |
+| `SEAStatus`              | type      | `'idle' \| 'active' \| 'done' \| 'error'`                                                                                                                                 | Names the overall status of the SEA build.                                              |
+| `SEAErrorCode`           | type      | `'PLATFORM' \| 'ENTRY' \| 'ASSET' \| 'BLOB' \| 'FORMAT' \| 'INJECT' \| 'ROOM' \| 'FUSE' \| 'SIGN' \| 'SHELL' \| 'TIMEOUT' \| 'ABORT' \| 'OUTPUT' \| 'STATE' \| 'BROWSER'` | Names the machine-readable error code carried by every `SEAError`.                      |
+| `SEAEntryFormat`         | type      | `'cjs' \| 'esm'`                                                                                                                                                          | Names the SEA entry point module format.                                                |
+| `SEAEntryOptions`        | interface | `{ path, format? }`                                                                                                                                                       | Describes the SEA entry point.                                                          |
+| `SEABlobOptions`         | interface | `{ cache?, snapshot? }`                                                                                                                                                   | Controls generated SEA blob behavior.                                                   |
+| `SEAEventMap`            | type      | `{ compress, progress, blob, assemble, complete, error }`                                                                                                                 | Lists the events emitted by a `SEAInterface`.                                           |
+| `SEAOptions`             | interface | `{ on?, error?, name, entry, output, assets?, compression?, windows?, root?, signal?, timeout?, blob? }`                                                                  | Configures the creation of a SEA build.                                                 |
+| `SEAWindowsOptions`      | interface | `{ terminal?, sign? }`                                                                                                                                                    | Configures Windows-specific SEA build behavior.                                         |
+| `SEAWindowsSignOptions`  | interface | `{ file?, password?, thumbprint?, timestamp?, digest? }`                                                                                                                  | Describes the Windows Authenticode signing options passed through to `signtool`.        |
+| `SEAResult`              | interface | `{ executable, platform, size, duration, compression?, signed, stripped, terminal? }`                                                                                     | Represents the result of a successful SEA build.                                        |
+| `SEAInterface`           | interface | `{ emitter, status } plus execute, destroy`                                                                                                                               | Represents a SEA build orchestrator.                                                    |
 
 ## Methods
 
-The public methods of each behavioral interface — every call-signature member listed (a `readonly` data member, for example `format` or `emitter`, stays a Surface row). Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface.
+The public methods of each behavioral interface — one table per type, keyed by its backticked name, every call-signature member listed. A `readonly` data member, `format` on `Injector` and `emitter` / `status` / `count` on the others, stays in the interface's `Shape` cell and off these tables. Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface.
 
 #### `SEAInterface`
 
 `execute` runs the build pipeline; `destroy` tears down the emitter.
 
-| Method    | Returns              | Behavior                                                                |
-| --------- | -------------------- | ----------------------------------------------------------------------- |
-| `execute` | `Promise<SEAResult>` | Run compress → blob → assemble and return the result (throws on error). |
-| `destroy` | `void`               | Tear down the emitter.                                                  |
+| Method    | Returns              | Summary                                                                    |
+| --------- | -------------------- | -------------------------------------------------------------------------- |
+| `execute` | `Promise<SEAResult>` | Runs the compress, blob, and assemble stages and returns the build result. |
+| `destroy` | `void`               | Tears down the emitter.                                                    |
 
 #### `InjectorInterface`
 
 `inject` performs the one-shot resource write.
 
-| Method   | Returns | Behavior                                             |
-| -------- | ------- | ---------------------------------------------------- |
-| `inject` | `void`  | Inject the resource data into the target executable. |
+| Method   | Returns | Summary                                        |
+| -------- | ------- | ---------------------------------------------- |
+| `inject` | `void`  | Injects the resource data into the executable. |
 
 #### `AssetManagerInterface`
 
 `asset` / `assets` are the singular/plural accessors; `register` / `load` add assets; `clear` / `destroy` are the lifecycle pair.
 
-| Method     | Returns                       | Behavior                                                      |
-| ---------- | ----------------------------- | ------------------------------------------------------------- |
-| `asset`    | `AssetInterface \| undefined` | Look up one registered asset by key.                          |
-| `assets`   | `readonly AssetInterface[]`   | List all registered assets, in registration order.            |
-| `keys`     | `readonly string[]`           | List all registered asset keys, in registration order.        |
-| `register` | `void`                        | Register one or more assets.                                  |
-| `load`     | `void`                        | Load the configured assets from disk (no-op inside SEA mode). |
-| `clear`    | `void`                        | Remove all registered assets without destroying the manager.  |
-| `destroy`  | `void`                        | Clear all assets and tear down the emitter.                   |
+| Method     | Returns                       | Summary                                                                       |
+| ---------- | ----------------------------- | ----------------------------------------------------------------------------- |
+| `asset`    | `AssetInterface \| undefined` | Looks up one registered asset by key.                                         |
+| `assets`   | `readonly AssetInterface[]`   | Lists every registered asset, in registration order.                          |
+| `keys`     | `readonly string[]`           | Lists every registered asset key, in registration order.                      |
+| `register` | `void`                        | Registers one asset, or every asset of a list.                                |
+| `load`     | `void`                        | Loads the configured assets from disk, and registers nothing inside SEA mode. |
+| `clear`    | `void`                        | Removes every registered asset without destroying the manager.                |
+| `destroy`  | `void`                        | Clears every registered asset and tears down the emitter.                     |
 
 ## Usage
 
@@ -347,6 +358,17 @@ alignELFNoteSize(10) // 12 — the next four-byte ELF note boundary
 alignTo(4097, 4096) // 8192 — the general form behind every format's alignment
 isPowerOfTwo(4096) // true
 ```
+
+## Tests
+
+- [`tests/guides.test.ts`](../tests/guides.test.ts) — the `## Surface` ↔ `src/server` bijection (value and type exports), the `SEAInterface` ↔ `SEA`, `InjectorInterface` ↔ `Injector`, and `AssetManagerInterface` ↔ `AssetManager` method bijections, and the equality gate: every `Summary` cell against its declaration's description paragraph, the titled `Build a single executable` fence against the `@example` block of that title (pinned so the titled pair cannot be retired silently), and the README pitch against this guide's tagline. It also runs the flagship fences and asserts the values their comments claim.
+- [`tests/src/server/seas/SEA.test.ts`](../tests/src/server/seas/SEA.test.ts) — the build pipeline end to end: the status transitions, the emitted `compress` / `progress` / `blob` / `assemble` / `complete` events, the compressed-asset key rewrite that leaves the caller's `assets` record alone, abort through `SEAOptions.signal`, the per-command timeout, and the `windows.sign` option validation.
+- [`tests/src/server/injectors/Injector.test.ts`](../tests/src/server/injectors/Injector.test.ts) — format detection from the header magic, and injection into synthetic PE, ELF, and Mach-O fixtures, including the `ROOM` refusals a host layout forces and the `INJECT` failures it does not.
+- [`tests/src/server/assets/Asset.test.ts`](../tests/src/server/assets/Asset.test.ts) — the key, the content buffer, and the `compressed` flag inferred from a `.br` suffix or taken from the input.
+- [`tests/src/server/assets/AssetManager.test.ts`](../tests/src/server/assets/AssetManager.test.ts) — registration, the singular and plural accessors in registration order, `load` from disk with an `error` event per missing path, `clear`, and `destroy`.
+- [`tests/src/server/helpers.test.ts`](../tests/src/server/helpers.test.ts) — every exported helper against real files and real processes: the shell boundary and its `ShellError`, the path and key assertions including symlink escape, Brotli compression and its size arithmetic, the fixed-width binary readers and writers, the PE subsystem and signature patches, the sentinel fuse patch, the ELF note header, the streaming copy and append, the signing argv, and the browser launch.
+- [`tests/src/server/factories.test.ts`](../tests/src/server/factories.test.ts) — each factory returns the published contract and honors the options it is given.
+- [`tests/src/server/validators.test.ts`](../tests/src/server/validators.test.ts) — `isExecutableFormat` accepts `pe`, `elf`, and `macho` and stays total for every other value.
 
 ## See also
 

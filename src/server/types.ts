@@ -322,14 +322,23 @@ export interface AssetManagerOptions {
  * Outside SEA, `load()` reads the paths `assets` configures from disk.
  */
 export interface AssetManagerInterface {
+	/** Holds the emitter reporting the register, load, clear, and error events. */
 	readonly emitter: EmitterInterface<AssetManagerEventMap>
+	/** Holds the number of assets registered so far. */
 	readonly count: number
+	/** Looks up one registered asset by key. */
 	asset(key: string): AssetInterface | undefined
+	/** Lists every registered asset, in registration order. */
 	assets(): readonly AssetInterface[]
+	/** Lists every registered asset key, in registration order. */
 	keys(): readonly string[]
+	/** Registers one asset, or every asset of a list. */
 	register(input: AssetInput | readonly AssetInput[]): void
+	/** Loads the configured assets from disk, and registers nothing inside SEA mode. */
 	load(): void
+	/** Removes every registered asset without destroying the manager. */
 	clear(): void
+	/** Clears every registered asset and tears down the emitter. */
 	destroy(): void
 }
 
@@ -535,8 +544,12 @@ export interface SEAResult {
  * injects the blob through the built-in Injector, and handles platform-specific signing.
  */
 export interface SEAInterface {
+	/** Holds the emitter reporting each build stage as it completes. */
 	readonly emitter: EmitterInterface<SEAEventMap>
+	/** Holds the phase the build has reached. */
 	readonly status: SEAStatus
+	/** Runs the compress, blob, and assemble stages and returns the build result. */
 	execute(): Promise<SEAResult>
+	/** Tears down the emitter. */
 	destroy(): void
 }
