@@ -1,4 +1,5 @@
 import type { ExecutableFormat } from './types.js'
+import { literalOf } from '@orkestrel/contract'
 
 // === Type Guards
 
@@ -15,5 +16,5 @@ import type { ExecutableFormat } from './types.js'
  * ```
  */
 export function isExecutableFormat(value: unknown): value is ExecutableFormat {
-	return value === 'pe' || value === 'elf' || value === 'macho'
+	return literalOf('pe', 'elf', 'macho')(value)
 }

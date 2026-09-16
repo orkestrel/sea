@@ -1,4 +1,5 @@
 import type { SEAErrorCode } from './types.js'
+import { isInstance } from '@orkestrel/contract'
 
 // Error surface for the SEA build. `SEAError` is the coded base every
 // domain failure throws through, so a caller can branch on `code` rather
@@ -53,7 +54,7 @@ export class SEAError extends Error {
  * ```
  */
 export function isSEAError(value: unknown): value is SEAError {
-	return value instanceof SEAError
+	return isInstance(value, SEAError)
 }
 
 /**
@@ -101,5 +102,5 @@ export class ShellError extends SEAError {
  * ```
  */
 export function isShellError(value: unknown): value is ShellError {
-	return value instanceof ShellError
+	return isInstance(value, ShellError)
 }

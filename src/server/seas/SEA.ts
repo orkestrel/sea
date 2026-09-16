@@ -19,6 +19,7 @@ import {
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Emitter } from '@orkestrel/emitter'
+import { isError } from '@orkestrel/contract'
 import {
 	SEA_BLOB_RESOURCE,
 	SEA_SENTINEL_FUSE,
@@ -314,7 +315,7 @@ export class SEA implements SEAInterface {
 						executeShell([...platform.remove, temp], shell)
 					} catch (thrown: unknown) {
 						throw new SEAError('SIGN', 'Failed to strip existing signature', {
-							cause: thrown instanceof Error ? thrown.message : String(thrown),
+							cause: isError(thrown) ? thrown.message : String(thrown),
 						})
 					}
 					stripped = true
@@ -336,7 +337,7 @@ export class SEA implements SEAInterface {
 						executeShell([...platform.sign, temp], shell)
 					} catch (thrown: unknown) {
 						throw new SEAError('SIGN', 'Failed to sign executable', {
-							cause: thrown instanceof Error ? thrown.message : String(thrown),
+							cause: isError(thrown) ? thrown.message : String(thrown),
 						})
 					}
 
@@ -346,7 +347,7 @@ export class SEA implements SEAInterface {
 							executeShell([...platform.verify, temp], shell)
 						} catch (thrown: unknown) {
 							throw new SEAError('SIGN', 'Signature verification failed', {
-								cause: thrown instanceof Error ? thrown.message : String(thrown),
+								cause: isError(thrown) ? thrown.message : String(thrown),
 							})
 						}
 					}

@@ -33,6 +33,7 @@ import {
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
 import { resolve, relative, join, extname, isAbsolute, sep, dirname } from 'node:path'
 import { detach, executeSync } from '@orkestrel/process/server'
+import { isError, isString } from '@orkestrel/contract'
 import {
 	BROTLI_EXTENSION,
 	DEFAULT_ENTRY_FORMAT,
@@ -776,7 +777,7 @@ export function ensureContained(base: string, path: string): string {
 		real = realpathSync(resolved)
 		realBase = realpathSync(base)
 	} catch (thrown: unknown) {
-		const cause = thrown instanceof Error ? thrown.message : String(thrown)
+		const cause = isError(thrown) ? thrown.message : String(thrown)
 		throw new SEAError('ASSET', 'Path not found or unresolvable', { path, cause })
 	}
 
@@ -859,9 +860,7 @@ export function syncDirectory(path: string): void {
 		}
 	} catch (thrown: unknown) {
 		const code =
-			thrown instanceof Error && 'code' in thrown && typeof thrown.code === 'string'
-				? thrown.code
-				: undefined
+			isError(thrown) && 'code' in thrown && isString(thrown.code) ? thrown.code : undefined
 		// These codes mean "this filesystem/platform doesn't support directory
 		// fsync" — benign and safe to ignore. Anything else (for example ENOENT, the
 		// directory truly doesn't exist) is a genuine failure.
@@ -874,7 +873,7 @@ export function syncDirectory(path: string): void {
 		) {
 			return
 		}
-		const cause = thrown instanceof Error ? thrown.message : String(thrown)
+		const cause = isError(thrown) ? thrown.message : String(thrown)
 		throw new SEAError('OUTPUT', 'Failed to sync output directory', { path, cause })
 	}
 }
@@ -909,7 +908,7 @@ export function finalizeExecutable(source: string, target: string): void {
 		}
 		renameSync(source, target)
 	} catch (thrown: unknown) {
-		const cause = thrown instanceof Error ? thrown.message : String(thrown)
+		const cause = isError(thrown) ? thrown.message : String(thrown)
 		throw new SEAError('OUTPUT', 'Failed to finalize executable', { source, target, cause })
 	}
 	syncDirectory(dirname(target))
