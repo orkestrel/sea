@@ -294,7 +294,7 @@ export function buildPeFixture(options?: PeFixtureOptions): Buffer {
 	}
 
 	// Section table: the `.pad*` fillers a tight layout needs
-	for (let i = 0; i < fillerSections; i++) {
+	for (const i of Array.prototype.keys.call({ length: fillerSections })) {
 		const fillerOffset = sectionTableOffset + (baseSections + i) * PE_SECTION_HEADER_SIZE
 		buf.write(`.pad${String(i)}`, fillerOffset, 8, 'ascii')
 		buf.writeUInt32LE(0x1000, fillerOffset + 8)
@@ -352,7 +352,7 @@ function parsePeSections(buf: Buffer): readonly PeSectionInfo[] {
 	const sectionTableOffset = coffOffset + 20 + optionalHeaderSize
 
 	const sections: PeSectionInfo[] = []
-	for (let i = 0; i < numberOfSections; i++) {
+	for (const i of Array.prototype.keys.call({ length: numberOfSections })) {
 		const off = sectionTableOffset + i * 40
 		const name = buf
 			.subarray(off, off + 8)
@@ -422,30 +422,20 @@ export function walkPeResourceDirectory(
 	const numId = buf.readUInt16LE(absOffset + 14)
 	const total = numNamed + numId
 
-	for (let i = 0; i < total; i++) {
+	for (const i of Array.prototype.keys.call({ length: total })) {
 		const entryOffset = absOffset + 16 + i * 8
 		const nameOrId = buf.readUInt32LE(entryOffset)
 		const offsetOrData = buf.readUInt32LE(entryOffset + 4)
 
-		let entryId = 0
-		let entryName: string | undefined
-		if ((nameOrId & 0x80000000) !== 0) {
-			entryName = readPeResourceString(buf, sectionRawOffset + (nameOrId & 0x7fffffff))
-		} else {
-			entryId = nameOrId
-		}
-
-		let nextTypeId = typeId
-		let nextTypeName = typeName
-		let nextNameId = nameId
-		let nextNameName = nameName
-		if (depth === 0) {
-			nextTypeId = entryId
-			nextTypeName = entryName
-		} else if (depth === 1) {
-			nextNameId = entryId
-			nextNameName = entryName
-		}
+		const named = (nameOrId & 0x80000000) !== 0
+		const entryId = named ? 0 : nameOrId
+		const entryName = named
+			? readPeResourceString(buf, sectionRawOffset + (nameOrId & 0x7fffffff))
+			: undefined
+		const nextTypeId = depth === 0 ? entryId : typeId
+		const nextTypeName = depth === 0 ? entryName : typeName
+		const nextNameId = depth === 1 ? entryId : nameId
+		const nextNameName = depth === 1 ? entryName : nameName
 
 		if ((offsetOrData & 0x80000000) !== 0) {
 			const subOffset = offsetOrData & 0x7fffffff
@@ -610,7 +600,7 @@ export function parseElfProgramHeaders(buf: Buffer): readonly ElfProgramHeader[]
 	const phdrCount = buf.readUInt16LE(56)
 
 	const headers: ElfProgramHeader[] = []
-	for (let i = 0; i < phdrCount; i++) {
+	for (const i of Array.prototype.keys.call({ length: phdrCount })) {
 		const off = phdrOffset + i * phdrEntrySize
 		headers.push({
 			type: buf.readUInt32LE(off),
@@ -858,7 +848,7 @@ export function buildMachoFixture(options?: MachoFixtureOptions): Buffer {
 		// Each declared section sits inside `__LINKEDIT`'s own file range, so it
 		// stays clear of the first section the Injector measures its header room
 		// against.
-		for (let s = 0; s < linkeditSections; s++) {
+		for (const s of Array.prototype.keys.call({ length: linkeditSections })) {
 			writeMachoSectionEntry(buf, linkeditCmdOffset + 72 + s * 80, {
 				sectName: `__link${String(s)}`,
 				segName: '__LINKEDIT',
@@ -891,13 +881,12 @@ export interface MachoLoadCommand {
 export function parseMachoLoadCommands(buf: Buffer): readonly MachoLoadCommand[] {
 	const ncmds = buf.readUInt32LE(16)
 	const commands: MachoLoadCommand[] = []
-	let offset = 32
-	for (let i = 0; i < ncmds; i++) {
+	Array.prototype.keys.call({ length: ncmds }).reduce((offset) => {
 		const cmd = buf.readUInt32LE(offset)
 		const size = buf.readUInt32LE(offset + 4)
 		commands.push({ cmd, size, offset })
-		offset += size
-	}
+		return offset + size
+	}, 32)
 	return commands
 }
 
@@ -949,7 +938,7 @@ export function findMachoSection(
 ): MachoSection | undefined {
 	const segment = parseMachoSegments(buf).find((s) => s.name === segmentName)
 	if (segment === undefined) return undefined
-	for (let i = 0; i < segment.nsects; i++) {
+	for (const i of Array.prototype.keys.call({ length: segment.nsects })) {
 		const sectOff = segment.offset + 72 + i * 80
 		const name = stripMachoNulls(buf.subarray(sectOff, sectOff + 16).toString('ascii'))
 		if (name !== sectionName) continue
@@ -962,4 +951,34 @@ export function findMachoSection(
 		}
 	}
 	return undefined
+}
+
+/** Recomputes the IMAGE checksum independently from the injector's streaming implementation. */
+export function computeSEAImageChecksum(buf: Buffer, checksumOffset: number): number {
+	const length = buf.length
+	const sum = Array.prototype.keys
+		.call({ length: Math.ceil(length / 2) })
+		.reduce((total, index) => {
+			const i = index * 2
+			const word =
+				i === checksumOffset || i === checksumOffset + 2
+					? 0
+					: i + 1 < length
+						? buf.readUInt16LE(i)
+						: buf.readUInt8(i)
+			const added = total + word
+			return (added & 0xffff) + (added >>> 16)
+		}, 0)
+	const folded = (sum & 0xffff) + (sum >>> 16)
+	return (folded + length) >>> 0
+}
+
+/** Builds binary padding around one sentinel fuse and value. */
+export function buildSEAFuseFixture(fuse: string, value: string): Buffer {
+	return Buffer.concat([
+		Buffer.from('padding-before-fuse-'),
+		Buffer.from(fuse, 'utf-8'),
+		Buffer.from(value, 'utf-8'),
+		Buffer.from('-padding-after'),
+	])
 }

@@ -151,18 +151,18 @@ describe('AssetManager', () => {
 	})
 
 	it('emits clear events', () => {
-		let cleared = false
+		const cleared = new AbortController()
 		const manager = new AssetManager({
 			on: {
 				clear: () => {
-					cleared = true
+					cleared.abort()
 				},
 			},
 		})
 
 		manager.clear()
 
-		expect(cleared).toBe(true)
+		expect(cleared.signal.aborted).toBe(true)
 
 		manager.destroy()
 	})

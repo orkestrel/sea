@@ -24,7 +24,13 @@ const MODULES = Object.freeze({ [PACKAGE_NAME]: 'src/server', '@src/server': 'sr
  * intentional rather than forgotten — and the assertion that follows it fails when a name
  * here stops being stranded, so the list cannot rot.
  */
-const INTERNAL: readonly string[] = Object.freeze([])
+const INTERNAL: readonly string[] = Object.freeze([
+	'class FileAppender',
+	'class FileCopier',
+	'class FusePatcher',
+	'class Injection',
+	'class SEAConstruction',
+])
 
 await new GuideCommand({
 	root: new URL('../', import.meta.url),

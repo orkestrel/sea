@@ -37,13 +37,10 @@ describe('sea integration', () => {
 					events.push('complete')
 				})
 
-				let result: Awaited<ReturnType<typeof sea.execute>>
-				try {
-					result = await sea.execute()
-				} catch (error) {
+				const result = await sea.execute().catch((error: unknown) => {
 					sea.destroy()
 					throw error
-				}
+				})
 
 				expect(result.platform).toBe(process.platform)
 				expect(result.size).toBeGreaterThan(0)

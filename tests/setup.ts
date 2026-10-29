@@ -20,3 +20,25 @@ export function encodeContent(text: string): ArrayBuffer {
 	new Uint8Array(content).set(bytes)
 	return content
 }
+
+/** Holds the path published by a scratch allocation callback. */
+export class SEAPathFixture {
+	#value = ''
+
+	get value(): string {
+		return this.#value
+	}
+	set value(value: string) {
+		this.#value = value
+	}
+}
+
+/** Supplies a class-instance error context. */
+export class SEAContextFixture {
+	readonly id = 'context'
+}
+
+/** Supplies a callable error context. */
+export function createCallableSEAContext(): (() => void) & { readonly id: string } {
+	return Object.assign(() => {}, { id: 'context' })
+}

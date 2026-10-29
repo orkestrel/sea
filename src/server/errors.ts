@@ -1,5 +1,5 @@
 import type { SEAErrorCode } from './types.js'
-import { isInstance } from '@orkestrel/contract'
+import { holds, INTRINSICS, isError, isFunction, isObject } from '@orkestrel/contract'
 
 // Error surface for the SEA build. `SEAError` is the coded base every
 // domain failure throws through, so a caller can branch on `code` rather
@@ -32,6 +32,7 @@ export class SEAError extends Error {
 
 	constructor(code: SEAErrorCode, message: string, context?: Readonly<Record<string, unknown>>) {
 		super(message)
+		INTRINSICS.define(this, Symbol.for('@orkestrel/sea.SEAError'), { value: this })
 		this.name = 'SEAError'
 		this.code = code
 		if (context !== undefined) {
@@ -42,6 +43,9 @@ export class SEAError extends Error {
 
 /**
  * Checks whether a value is a {@link SEAError}.
+ *
+ * @remarks
+ * Recognizes branded errors across package copies, including subclasses, and refuses transparent proxies.
  *
  * @param value - The value to test
  * @returns True if `value` is a `SEAError`; false otherwise
@@ -54,7 +58,32 @@ export class SEAError extends Error {
  * ```
  */
 export function isSEAError(value: unknown): value is SEAError {
-	return isInstance(value, SEAError)
+	return holds(() => {
+		if (!isError(value) || INTRINSICS.prototype(value) === Error.prototype) return false
+		const brand = INTRINSICS.describe(value, Symbol.for('@orkestrel/sea.SEAError'))
+		if (brand === undefined || brand.value !== value) return false
+		const code: unknown = INTRINSICS.reflect.read(value, 'code')
+		if (
+			code !== 'PLATFORM' &&
+			code !== 'ENTRY' &&
+			code !== 'ASSET' &&
+			code !== 'BLOB' &&
+			code !== 'FORMAT' &&
+			code !== 'INJECT' &&
+			code !== 'ROOM' &&
+			code !== 'FUSE' &&
+			code !== 'SIGN' &&
+			code !== 'SHELL' &&
+			code !== 'TIMEOUT' &&
+			code !== 'ABORT' &&
+			code !== 'OUTPUT' &&
+			code !== 'STATE' &&
+			code !== 'BROWSER'
+		)
+			return false
+		const context: unknown = INTRINSICS.reflect.read(value, 'context')
+		return context === undefined || isObject(context) || isFunction(context)
+	})
 }
 
 /**
@@ -82,6 +111,7 @@ export class ShellError extends SEAError {
 
 	constructor(message: string, stdout: Buffer, stderr: Buffer) {
 		super('SHELL', message)
+		INTRINSICS.define(this, Symbol.for('@orkestrel/sea.ShellError'), { value: this })
 		this.name = 'ShellError'
 		this.stdout = stdout
 		this.stderr = stderr
@@ -90,6 +120,9 @@ export class ShellError extends SEAError {
 
 /**
  * Checks whether a value is a {@link ShellError}.
+ *
+ * @remarks
+ * Recognizes branded errors across package copies, including subclasses, and refuses transparent proxies.
  *
  * @param value - The value to test
  * @returns True if `value` is a `ShellError`; false otherwise
@@ -102,5 +135,14 @@ export class ShellError extends SEAError {
  * ```
  */
 export function isShellError(value: unknown): value is ShellError {
-	return isInstance(value, ShellError)
+	return holds(() => {
+		if (!isSEAError(value)) return false
+		const brand = INTRINSICS.describe(value, Symbol.for('@orkestrel/sea.ShellError'))
+		return (
+			brand !== undefined &&
+			brand.value === value &&
+			Buffer.isBuffer(INTRINSICS.reflect.read(value, 'stdout')) &&
+			Buffer.isBuffer(INTRINSICS.reflect.read(value, 'stderr'))
+		)
+	})
 }

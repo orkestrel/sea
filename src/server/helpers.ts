@@ -13,14 +13,12 @@ import type {
 	SEAWindowsSignOptions,
 } from './types.js'
 import {
-	appendFileSync,
 	existsSync,
 	openSync,
 	readSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
-	statSync,
 	writeSync,
 	closeSync,
 	writeFileSync,
@@ -33,7 +31,7 @@ import {
 import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
 import { resolve, relative, join, extname, isAbsolute, sep, dirname } from 'node:path'
 import { detach, executeSync } from '@orkestrel/process/server'
-import { isError, isString } from '@orkestrel/contract'
+import { attempt, isError, isString } from '@orkestrel/contract'
 import {
 	BROTLI_EXTENSION,
 	DEFAULT_ENTRY_FORMAT,
@@ -42,6 +40,9 @@ import {
 	SEA_PLATFORMS,
 	SKIP_EXTENSIONS,
 } from './constants.js'
+import { FileAppender } from './FileAppender.js'
+import { FileCopier } from './FileCopier.js'
+import { FusePatcher } from './FusePatcher.js'
 import { SEAError, ShellError } from './errors.js'
 
 // === Platform Helpers
@@ -239,13 +240,8 @@ export function compressFile(
 	// walkDirectory already skips symlinks on the read side; mirror that here
 	// on the write side so a planted symlink at `output` (for example `X.br -> /victim`)
 	// cannot redirect this write to an arbitrary file.
-	let outputStat: ReturnType<typeof lstatSync> | undefined
-	try {
-		outputStat = lstatSync(output)
-	} catch {
-		outputStat = undefined
-	}
-	if (outputStat !== undefined && outputStat.isSymbolicLink()) {
+	const outputStat = attempt(() => lstatSync(output))
+	if (outputStat.success && outputStat.value.isSymbolicLink()) {
 		throw new SEAError('OUTPUT', 'Refusing to write compressed output through a symlink', {
 			output,
 		})
@@ -275,24 +271,25 @@ export function compressDirectory(
 ): SEACompressionManifest {
 	const files = walkDirectory(directory)
 	const results: SEACompressionResult[] = []
-	let totalOriginal = 0
-	let totalCompressed = 0
+	const totals = files.reduce(
+		(total, relativePath) => {
+			const fullPath = resolve(directory, relativePath)
+			if (!isCompressible(fullPath)) return total
 
-	for (const relativePath of files) {
-		const fullPath = resolve(directory, relativePath)
-		if (!isCompressible(fullPath)) continue
-
-		const outputPath = fullPath + BROTLI_EXTENSION
-		const result = compressFile(fullPath, outputPath, options)
-		results.push(result)
-		totalOriginal += result.size.original
-		totalCompressed += result.size.compressed
-		progress?.(result)
-	}
+			const outputPath = fullPath + BROTLI_EXTENSION
+			const result = compressFile(fullPath, outputPath, options)
+			results.push(result)
+			const original = total.original + result.size.original
+			const compressed = total.compressed + result.size.compressed
+			progress?.(result)
+			return { original, compressed }
+		},
+		{ original: 0, compressed: 0 },
+	)
 
 	return {
 		assets: results,
-		total: computeSize(totalOriginal, totalCompressed),
+		total: computeSize(totals.original, totals.compressed),
 	}
 }
 
@@ -430,21 +427,7 @@ export function writeU64(fd: number, offset: number, value: bigint): void {
  * ```
  */
 export function appendFile(target: string, source: string, chunk = 4 * 1024 * 1024): void {
-	const fd = openSync(source, 'r')
-	try {
-		const size = statSync(source).size
-		const buffer = Buffer.alloc(Math.min(chunk, size))
-		let offset = 0
-		while (offset < size) {
-			const toRead = Math.min(chunk, size - offset)
-			const bytesRead = readSync(fd, buffer, 0, toRead, offset)
-			if (bytesRead === 0) break
-			appendFileSync(target, buffer.subarray(0, bytesRead))
-			offset += bytesRead
-		}
-	} finally {
-		closeSync(fd)
-	}
+	new FileAppender().execute(target, source, chunk)
 }
 
 /**
@@ -533,9 +516,10 @@ export function writeU16(fd: number, offset: number, value: number): void {
  * @returns True if the file has a valid PE signature; false otherwise
  */
 export function isPEExecutable(path: string): boolean {
-	let fd: number | undefined
+	const opened = attempt(() => openSync(path, 'r'))
+	if (!opened.success) return false
+	const fd = opened.value
 	try {
-		fd = openSync(path, 'r')
 		const peOffset = readPEOffset(fd)
 		const sig = Buffer.alloc(4)
 		readSync(fd, sig, 0, 4, peOffset)
@@ -543,7 +527,7 @@ export function isPEExecutable(path: string): boolean {
 	} catch {
 		return false
 	} finally {
-		if (fd !== undefined) closeSync(fd)
+		closeSync(fd)
 	}
 }
 
@@ -657,15 +641,13 @@ export function buildSignCommand(sign: SEAWindowsSignOptions, target: string): r
 	}
 
 	if (sign.timestamp !== undefined) {
-		let parsed: URL
-		try {
-			parsed = new URL(sign.timestamp)
-		} catch {
+		const parsed = attempt(() => new URL(sign.timestamp ?? ''))
+		if (!parsed.success) {
 			throw new SEAError('SIGN', 'Windows signing timestamp must be an http(s) URL', {
 				timestamp: sign.timestamp,
 			})
 		}
-		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+		if (parsed.value.protocol !== 'http:' && parsed.value.protocol !== 'https:') {
 			throw new SEAError('SIGN', 'Windows signing timestamp must be an http(s) URL', {
 				timestamp: sign.timestamp,
 			})
@@ -771,16 +753,14 @@ export function ensureSafeKey(key: string): void {
 export function ensureContained(base: string, path: string): string {
 	const resolved = resolve(base, path)
 
-	let real: string
-	let realBase: string
-	try {
-		real = realpathSync(resolved)
-		realBase = realpathSync(base)
-	} catch (thrown: unknown) {
+	const paths = attempt(() => ({ real: realpathSync(resolved), realBase: realpathSync(base) }))
+	if (!paths.success) {
+		const thrown = paths.error
 		const cause = isError(thrown) ? thrown.message : String(thrown)
 		throw new SEAError('ASSET', 'Path not found or unresolvable', { path, cause })
 	}
 
+	const { real, realBase } = paths.value
 	if (real !== realBase && !real.startsWith(realBase + sep)) {
 		throw new SEAError('ASSET', 'Path escapes the build root', { base, path })
 	}
@@ -1050,28 +1030,7 @@ export function copyRange(
 	length: number,
 	chunk = 4 * 1024 * 1024,
 ): void {
-	if (length <= 0) return
-
-	const bufferSize = Math.min(chunk, length)
-	const buffer = Buffer.alloc(bufferSize)
-	let position = start
-	let remaining = length
-
-	while (remaining > 0) {
-		const toRead = Math.min(chunk, remaining)
-		const bytesRead = readSync(source, buffer, 0, toRead, position)
-		if (bytesRead === 0) {
-			throw new SEAError('OUTPUT', 'Unexpected end of file while copying byte range', {
-				start,
-				length,
-				position,
-				remaining,
-			})
-		}
-		writeSync(target, buffer, 0, bytesRead, null)
-		position += bytesRead
-		remaining -= bytesRead
-	}
+	new FileCopier().execute(source, target, start, length, chunk)
 }
 
 // === SEA Helpers
@@ -1092,57 +1051,7 @@ export function copyRange(
  * @throws SEAError with code `'FUSE'` when the fuse is not found in the executable
  */
 export function patchSentinelFuse(executable: string, fuse: string): void {
-	const fd = openSync(executable, 'r+')
-	try {
-		const needle = Buffer.from(fuse, 'utf-8')
-		const chunkSize = 64 * 1024 * 1024 // 64 MB
-		const readSize = chunkSize + needle.length
-		const buffer = Buffer.alloc(readSize)
-
-		let offset = 0
-		while (true) {
-			const bytesRead = readSync(fd, buffer, 0, readSize, offset)
-			if (bytesRead === 0) break
-
-			const chunk = buffer.subarray(0, bytesRead)
-			const idx = chunk.indexOf(needle)
-
-			if (idx !== -1) {
-				const fuseEnd = offset + idx + needle.length
-				const valueBuf = Buffer.alloc(2)
-				const valueRead = readSync(fd, valueBuf, 0, 2, fuseEnd)
-
-				if (valueRead < 2) {
-					throw new SEAError('FUSE', 'Could not read sentinel fuse value', { executable, fuse })
-				}
-
-				const value = valueBuf.toString('utf-8')
-
-				if (value === ':0') {
-					writeSync(fd, Buffer.from('1', 'utf-8'), 0, 1, fuseEnd + 1)
-					return
-				}
-
-				if (value === ':1') {
-					return // Already patched
-				}
-
-				throw new SEAError('FUSE', `Unexpected sentinel fuse value: ${value}`, {
-					executable,
-					fuse,
-				})
-			}
-
-			offset += chunkSize
-		}
-
-		throw new SEAError('FUSE', `Sentinel fuse not found in executable: ${fuse}`, {
-			executable,
-			fuse,
-		})
-	} finally {
-		closeSync(fd)
-	}
+	new FusePatcher().execute(executable, fuse)
 }
 
 // === Runtime Helpers
@@ -1173,26 +1082,24 @@ export function patchSentinelFuse(executable: string, fuse: string): void {
  * ```
  */
 export function openBrowser(url: string): void {
-	let parsed: URL
-	try {
-		parsed = new URL(url)
-	} catch {
+	const parsed = attempt(() => new URL(url))
+	if (!parsed.success) {
 		throw new SEAError('BROWSER', 'openBrowser requires a valid absolute URL', { url })
 	}
 
-	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+	if (parsed.value.protocol !== 'http:' && parsed.value.protocol !== 'https:') {
 		throw new SEAError('BROWSER', 'openBrowser only supports http and https URLs', {
 			url,
-			protocol: parsed.protocol,
+			protocol: parsed.value.protocol,
 		})
 	}
 
 	const command =
 		process.platform === 'win32'
-			? { file: 'rundll32', arguments: ['url.dll,FileProtocolHandler', parsed.href] }
+			? { file: 'rundll32', arguments: ['url.dll,FileProtocolHandler', parsed.value.href] }
 			: process.platform === 'darwin'
-				? { file: 'open', arguments: [parsed.href] }
-				: { file: 'xdg-open', arguments: [parsed.href] }
+				? { file: 'open', arguments: [parsed.value.href] }
+				: { file: 'xdg-open', arguments: [parsed.value.href] }
 
 	// Best-effort fire-and-forget launch: `detach` refuses only a structurally
 	// invalid command (an empty file name or a NUL character), which neither the

@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Injector, isSEAError, PE_SECTION_HEADER_SIZE, SEA_SENTINEL_FUSE } from '@src/server'
 import {
+	computeSEAImageChecksum,
 	buildElfFixture,
 	buildFatMachoFixture,
 	buildMachoFixture,
@@ -17,27 +18,6 @@ import {
 	withTestDir,
 } from '../../../setupServer.js'
 import { captureError } from '@orkestrel/test'
-
-// Recomputes the classic Windows IMAGE checksum independently of the
-// injector's implementation, to assert against without testing a tautology.
-function computePeChecksum(buf: Buffer, checksumOffset: number): number {
-	let sum = 0
-	const length = buf.length
-	for (let i = 0; i < length; i += 2) {
-		let word: number
-		if (i === checksumOffset || i === checksumOffset + 2) {
-			word = 0
-		} else if (i + 1 < length) {
-			word = buf.readUInt16LE(i)
-		} else {
-			word = buf.readUInt8(i)
-		}
-		sum += word
-		sum = (sum & 0xffff) + (sum >>> 16)
-	}
-	sum = (sum & 0xffff) + (sum >>> 16)
-	return (sum + length) >>> 0
-}
 
 describe('Injector', () => {
 	describe('detection', () => {
@@ -402,7 +382,7 @@ describe('Injector', () => {
 				const storedChecksum = result.readUInt32LE(checksumOffset)
 
 				expect(storedChecksum).not.toBe(0)
-				expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
+				expect(storedChecksum).toBe(computeSEAImageChecksum(result, checksumOffset))
 			})
 		})
 
@@ -449,7 +429,7 @@ describe('Injector', () => {
 				// already flipped) — must match exactly, proving the checksum ran
 				// after the fuse mutation, not before.
 				expect(storedChecksum).not.toBe(0)
-				expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
+				expect(storedChecksum).toBe(computeSEAImageChecksum(result, checksumOffset))
 			})
 		})
 
@@ -477,7 +457,7 @@ describe('Injector', () => {
 				const checksumOffset = optionalOffset + 64
 				const storedChecksum = result.readUInt32LE(checksumOffset)
 				expect(storedChecksum).not.toBe(0)
-				expect(storedChecksum).toBe(computePeChecksum(result, checksumOffset))
+				expect(storedChecksum).toBe(computeSEAImageChecksum(result, checksumOffset))
 			})
 		})
 

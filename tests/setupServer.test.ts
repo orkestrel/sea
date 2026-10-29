@@ -9,6 +9,7 @@ import type { PeResourceLeaf } from './setupServer.js'
 import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { SEAPathFixture } from './setup.js'
 import {
 	buildElfFixture,
 	buildFatMachoFixture,
@@ -47,12 +48,12 @@ describe('setupServer', () => {
 
 	describe('withTestDir', () => {
 		it('seeds the allocation, hands it to the callback, and removes it afterwards', async () => {
-			let allocated = ''
+			const allocated = new SEAPathFixture()
 
 			const returned = await withTestDir(
 				{ 'entry.cjs': "console.log('seeded')\n", 'base/blob.bin': 'payload' },
 				(scratch) => {
-					allocated = scratch.path
+					allocated.value = scratch.path
 					// Read with `node:fs` rather than `scratch.read`, so the assertion does not
 					// return through the writer that seeded the files.
 					expect(isAbsolute(scratch.path)).toBe(true)
@@ -65,16 +66,16 @@ describe('setupServer', () => {
 			)
 
 			expect(returned).toBe('callback result')
-			expect(allocated).not.toBe('')
-			expect(existsSync(allocated)).toBe(false)
+			expect(allocated.value).not.toBe('')
+			expect(existsSync(allocated.value)).toBe(false)
 		})
 
 		it('removes the allocation and rethrows when the callback throws', async () => {
 			const failure = new Error('callback failed')
-			let allocated = ''
+			const allocated = new SEAPathFixture()
 
 			const thrown: unknown = await withTestDir({ 'entry.cjs': '' }, (scratch) => {
-				allocated = scratch.path
+				allocated.value = scratch.path
 				expect(existsSync(scratch.path)).toBe(true)
 				throw failure
 			}).then(
@@ -83,7 +84,7 @@ describe('setupServer', () => {
 			)
 
 			expect(thrown).toBe(failure)
-			expect(existsSync(allocated)).toBe(false)
+			expect(existsSync(allocated.value)).toBe(false)
 		})
 	})
 

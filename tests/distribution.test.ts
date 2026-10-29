@@ -9,6 +9,7 @@ import type { TestContext } from 'vitest'
 import { isArray, isObject, isString } from '@orkestrel/contract'
 import { spawnSync } from 'node:child_process'
 import {
+	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -31,7 +32,10 @@ const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 // compiler majors this toolchain supports, and its in-process API is not. It is
 // resolved from the workspace under proof, so a consumer of the packed artifact is
 // checked by the same compiler that workspace's own `check` script runs.
-const TSC = createRequire(join(ROOT, 'package.json')).resolve('typescript/bin/tsc')
+const TSC = join(
+	dirname(createRequire(join(ROOT, 'package.json')).resolve('typescript/package.json')),
+	'bin/tsc',
+)
 // Windows needs a shell to launch a `.cmd`: Node refuses one directly since the
 // batch-argument hardening, and `spawnSync` returns `EINVAL` with a null status
 // rather than an exit code a caller can read. Every following argument is a literal or
@@ -193,14 +197,19 @@ function isNames(value: unknown): value is readonly string[] {
 function isPackageTarget(target: string): boolean {
 	if (!target.startsWith('./')) return false
 	for (const segment of target.slice(2).split(/[\\/]/u)) {
-		let decoded = segment
-		try {
-			decoded = decodeURIComponent(segment)
-		} catch {}
+		const decoded = decodeSegment(segment)
 		const normalized = decoded.toLowerCase()
 		if (normalized === '.' || normalized === '..' || normalized === 'node_modules') return false
 	}
 	return true
+}
+
+function decodeSegment(segment: string): string {
+	try {
+		return decodeURIComponent(segment)
+	} catch {
+		return segment
+	}
 }
 
 function readJson(path: string): unknown {
@@ -284,11 +293,16 @@ function matchesFile(path: string): boolean {
 // the containing condition or fallback list unresolved, so the walk continues.
 function targetToDeclaration(target: string, installed: string): string | undefined {
 	if (!isPackageTarget(target)) return undefined
-	let declaration = target
-	if (target.endsWith('.cjs')) declaration = `${target.slice(0, -4)}.d.cts`
-	else if (target.endsWith('.mjs')) declaration = `${target.slice(0, -4)}.d.mts`
-	else if (target.endsWith('.js')) declaration = `${target.slice(0, -3)}.d.ts`
-	else if (!isDeclaration(target)) return undefined
+	const declaration = target.endsWith('.cjs')
+		? `${target.slice(0, -4)}.d.cts`
+		: target.endsWith('.mjs')
+			? `${target.slice(0, -4)}.d.mts`
+			: target.endsWith('.js')
+				? `${target.slice(0, -3)}.d.ts`
+				: isDeclaration(target)
+					? target
+					: undefined
+	if (declaration === undefined) return undefined
 	return matchesFile(join(installed, declaration)) ? declaration : undefined
 }
 
@@ -320,22 +334,22 @@ function resolveDeclaration(
 // physical nested manifest starts a scope even when it omits `type` or cannot be
 // parsed. A directory at that spelling is not a manifest, so the walk continues.
 function readPackageType(installed: string, target: string): unknown {
-	let directory = dirname(join(installed, target))
-	while (true) {
-		const path = join(directory, 'package.json')
-		if (matchesFile(path)) {
-			try {
-				const manifest = readJson(path)
-				return isRecord(manifest) ? manifest.type : undefined
-			} catch {
-				return undefined
-			}
+	return readDirectoryType(installed, dirname(join(installed, target)))
+}
+
+function readDirectoryType(installed: string, directory: string): unknown {
+	const path = join(directory, 'package.json')
+	if (matchesFile(path)) {
+		try {
+			const manifest = readJson(path)
+			return isRecord(manifest) ? manifest.type : undefined
+		} catch {
+			return undefined
 		}
-		if (directory === installed) return undefined
-		const parent = dirname(directory)
-		if (parent === directory) return undefined
-		directory = parent
 	}
+	if (directory === installed) return undefined
+	const parent = dirname(directory)
+	return parent === directory ? undefined : readDirectoryType(installed, parent)
 }
 
 function resolvesBrowser(entry: unknown): boolean {
@@ -771,6 +785,61 @@ function requireStage(context: TestContext): Stage {
 }
 
 describe('installed package consumer', () => {
+	it('recognizes branded sea errors across distinct installed copies', (context) => {
+		const stage = requireStage(context)
+		const copy = join(stage.consumer, 'node_modules', '@orkestrel', 'sea-copy')
+		cpSync(stage.installed, copy, { recursive: true })
+		const driver = join(stage.consumer, 'sea-errors.mjs')
+		writeFile(
+			driver,
+			`import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+const require = createRequire(import.meta.url)
+const copies = [
+	await import('@orkestrel/sea'),
+	require('@orkestrel/sea'),
+	await import(pathToFileURL(process.argv[2]).href),
+]
+assert.equal(new Set(copies.map((entry) => entry.SEAError)).size, copies.length)
+assert.equal(new Set(copies.map((entry) => entry.ShellError)).size, copies.length)
+for (const owner of copies) {
+	const error = new owner.SEAError('STATE', 'failure')
+	class Derived extends owner.SEAError {
+		name = 'Derived'
+	}
+	const child = new Derived('STATE', 'failure')
+	const lookalike = Object.assign(new Error('failure'), { code: 'STATE' })
+	const shell = new owner.ShellError('failure', Buffer.alloc(0), Buffer.alloc(0))
+	class ShellDerived extends owner.ShellError {
+		name = 'ShellDerived'
+	}
+	const shellChild = new ShellDerived('failure', Buffer.alloc(0), Buffer.alloc(0))
+	const shellPlain = {}
+	Object.defineProperty(shellPlain, Symbol.for('@orkestrel/sea.ShellError'), { value: shellPlain })
+	const plain = {}
+	Object.defineProperty(plain, Symbol.for('@orkestrel/sea.SEAError'), { value: plain })
+	for (const reader of copies) {
+		assert.equal(reader.isSEAError(error), true)
+		assert.equal(reader.isSEAError(child), true)
+		assert.equal(reader.isSEAError(lookalike), false)
+		assert.equal(reader.isSEAError(new Proxy(error, {})), false)
+		assert.equal(reader.isSEAError(plain), false)
+		assert.equal(reader.isSEAError(shell), true)
+		assert.equal(reader.isShellError(shell), true)
+		assert.equal(reader.isShellError(shellChild), true)
+		assert.equal(reader.isShellError(lookalike), false)
+		assert.equal(reader.isShellError(new Proxy(shell, {})), false)
+		assert.equal(reader.isShellError(shellPlain), false)
+	}
+}
+`,
+		)
+		const result = runNode([driver, join(copy, 'dist/src/server/index.js')], stage.consumer)
+		expect(readOutput(result)).toBe('')
+		expect(result.status).toBe(0)
+	})
+
 	it('packs one archive and installs it in isolation [requires the registry]', (context) => {
 		const stage = requireStage(context)
 		expect(stage.archives).toHaveLength(1)

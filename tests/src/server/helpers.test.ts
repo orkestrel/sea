@@ -1,6 +1,7 @@
 import { closeSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { buildSEAFuseFixture } from '../../setupServer.js'
 import {
 	alignELFNoteSize,
 	alignTo,
@@ -877,19 +878,10 @@ describe('helpers', () => {
 	})
 
 	describe('patchSentinelFuse', () => {
-		function buildFuseFixture(fuse: string, value: string): Buffer {
-			return Buffer.concat([
-				Buffer.from('padding-before-fuse-'),
-				Buffer.from(fuse, 'utf-8'),
-				Buffer.from(value, 'utf-8'),
-				Buffer.from('-padding-after'),
-			])
-		}
-
 		it('flips an unset fuse from :0 to :1', () => {
 			return withTestDir({}, (scratch) => {
 				const path = join(scratch.path, 'app.exe')
-				writeFileSync(path, buildFuseFixture('MY_FUSE', ':0'))
+				writeFileSync(path, buildSEAFuseFixture('MY_FUSE', ':0'))
 
 				patchSentinelFuse(path, 'MY_FUSE')
 
@@ -901,7 +893,7 @@ describe('helpers', () => {
 		it('is a no-op when the fuse is already flipped to :1', () => {
 			return withTestDir({}, (scratch) => {
 				const path = join(scratch.path, 'app.exe')
-				const buf = buildFuseFixture('MY_FUSE', ':1')
+				const buf = buildSEAFuseFixture('MY_FUSE', ':1')
 				writeFileSync(path, buf)
 
 				patchSentinelFuse(path, 'MY_FUSE')
@@ -914,7 +906,7 @@ describe('helpers', () => {
 		it('throws SEAError code FUSE for an unexpected sentinel value', () => {
 			return withTestDir({}, (scratch) => {
 				const path = join(scratch.path, 'app.exe')
-				writeFileSync(path, buildFuseFixture('MY_FUSE', ':X'))
+				writeFileSync(path, buildSEAFuseFixture('MY_FUSE', ':X'))
 
 				const error = captureError(() => {
 					patchSentinelFuse(path, 'MY_FUSE')
