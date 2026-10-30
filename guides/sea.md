@@ -50,7 +50,7 @@ On Windows, `SEAOptions.windows.sign` is optional Authenticode signing. When pre
 
 ### Classes
 
-| API            | Kind  | Summary                                                                    |
+| Name           | Kind  | Summary                                                                    |
 | -------------- | ----- | -------------------------------------------------------------------------- |
 | `SEA`          | class | Runs a Node.js single executable application build to completion.          |
 | `Injector`     | class | Writes a named resource into a PE, ELF, or Mach-O executable in place.     |
@@ -59,7 +59,7 @@ On Windows, `SEAOptions.windows.sign` is optional Authenticode signing. When pre
 
 ### Factories
 
-| API                  | Kind     | Summary                                                                                                                                                                 |
+| Name                 | Kind     | Summary                                                                                                                                                                 |
 | -------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `createSEA`          | function | Creates a SEA build orchestrator over the given options and returns it as a `SEAInterface`, the published contract a caller holds instead of the `SEA` class.           |
 | `createInjector`     | function | Creates a resource injector bound to one target executable and returns it as an `InjectorInterface`, with the executable's format already detected from its header.     |
@@ -70,7 +70,7 @@ On Windows, `SEAOptions.windows.sign` is optional Authenticode signing. When pre
 
 A `Shape` cell holds the constant's declared type.
 
-| API                               | Kind  | Shape                                          | Summary                                                                                                               |
+| Name                              | Kind  | Shape                                          | Summary                                                                                                               |
 | --------------------------------- | ----- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `SEA_SENTINEL_FUSE`               | const | `string`                                       | Holds the SEA sentinel fuse value embedded in the Node.js binary, `NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`.   |
 | `SEA_BLOB_RESOURCE`               | const | `string`                                       | Names the SEA blob resource in the executable, `NODE_SEA_BLOB`.                                                       |
@@ -108,7 +108,7 @@ A `Shape` cell holds the constant's declared type.
 
 ### Helpers and errors
 
-| API                   | Kind     | Summary                                                                                                                                      |
+| Name                  | Kind     | Summary                                                                                                                                      |
 | --------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `isExecutableFormat`  | function | Checks whether a value is a valid `ExecutableFormat`.                                                                                        |
 | `resolvePlatform`     | function | Resolves the effective platform configuration.                                                                                               |
@@ -157,7 +157,7 @@ A `Shape` cell holds the constant's declared type.
 
 A `Shape` cell holds an interface's data members as bare names in braces, `?` marking an optional member and `plus` introducing its call-signature members, and a type alias's own type literal with a union's arms escaped as `\|`. An extended interface's name comes before `plus`, with the members it adds after.
 
-| API                      | Kind      | Shape                                                                                                                                                                     | Summary                                                                                 |
+| Name                     | Kind      | Shape                                                                                                                                                                     | Summary                                                                                 |
 | ------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `SEACompressionSize`     | interface | `{ original, compressed, ratio }`                                                                                                                                         | Represents a size comparison between original and compressed data.                      |
 | `SEACompressionMode`     | type      | `'generic' \| 'text' \| 'font'`                                                                                                                                           | Names a Brotli compression mode.                                                        |
