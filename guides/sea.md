@@ -68,8 +68,6 @@ On Windows, `SEAOptions.windows.sign` is optional Authenticode signing. When pre
 
 ### Constants
 
-A `Shape` cell holds the constant's declared type.
-
 | Name                              | Kind  | Signature                                          | Summary                                                                                                               |
 | --------------------------------- | ----- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `SEA_SENTINEL_FUSE`               | const | `"NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"` | Holds the SEA sentinel fuse value embedded in the Node.js binary, `NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2`.   |
@@ -155,8 +153,6 @@ A `Shape` cell holds the constant's declared type.
 
 ### Types
 
-A `Shape` cell holds an interface's data members as bare names in braces, `?` marking an optional member and `plus` introducing its call-signature members, and a type alias's own type literal with a union's arms escaped as `\|`. An extended interface's name comes before `plus`, with the members it adds after.
-
 | Name                     | Kind      | Signature                                                                                                                                                                                                                                                                                                                        | Summary                                                                                 |
 | ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `SEACompressionSize`     | interface | `{ original, compressed, ratio }`                                                                                                                                                                                                                                                                                                | Represents a size comparison between original and compressed data.                      |
@@ -197,7 +193,7 @@ A `Shape` cell holds an interface's data members as bare names in braces, `?` ma
 
 ## Methods
 
-The public methods of each behavioral interface — one table per type, keyed by its backticked name, every call-signature member listed. A `readonly` data member stays in the interface's `Shape` cell and off these tables: `format` on `InjectorInterface`, `emitter` and `status` on `SEAInterface`, `emitter` and `count` on `AssetManagerInterface`. Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface.
+The public methods of each behavioral interface — one table per type, keyed by its backticked name, every call-signature member listed. A `readonly` data member stays in the interface's `Signature` cell and off these tables: `format` on `InjectorInterface`, `emitter` and `status` on `SEAInterface`, `emitter` and `count` on `AssetManagerInterface`. Each concrete class implements its interface exactly, so this doubles as the class's instance-method surface.
 
 #### `SEAInterface`
 
