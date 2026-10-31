@@ -207,7 +207,7 @@ export function executeShell(command: readonly string[], options?: SEAShellOptio
  * @param compressed - Compressed byte count
  * @returns SEACompressionSize with ratio
  */
-export function computeSize(original: number, compressed: number): SEACompressionSize {
+export function computeCompressionSize(original: number, compressed: number): SEACompressionSize {
 	const ratio = original > 0 ? compressed / original : 0
 	return { original, compressed, ratio }
 }
@@ -252,7 +252,7 @@ export function compressFile(
 	return {
 		input,
 		output,
-		size: computeSize(raw.length, compressed.length),
+		size: computeCompressionSize(raw.length, compressed.length),
 	}
 }
 
@@ -289,7 +289,7 @@ export function compressDirectory(
 
 	return {
 		assets: results,
-		total: computeSize(totals.original, totals.compressed),
+		total: computeCompressionSize(totals.original, totals.compressed),
 	}
 }
 

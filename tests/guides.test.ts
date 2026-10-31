@@ -57,7 +57,7 @@ await new GuideCommand({
 		alignELFNoteSize,
 		alignTo,
 		buildSignCommand,
-		computeSize,
+		computeCompressionSize,
 		createAsset,
 		formatSize,
 		isCompressible,
@@ -232,7 +232,7 @@ await new GuideCommand({
 
 	describe('sea.md fences', () => {
 		it('returns the sizes the compression fence prints', () => {
-			const size = computeSize(1000, 400)
+			const size = computeCompressionSize(1000, 400)
 
 			expect(size).toEqual({ original: 1000, compressed: 400, ratio: 0.4 })
 			expect(formatSize(size.compressed)).toBe('400 B')

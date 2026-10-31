@@ -9,7 +9,7 @@ import {
 	buildELFNoteHeader,
 	compressDirectory,
 	compressFile,
-	computeSize,
+	computeCompressionSize,
 	copyRange,
 	buildBlobConfig,
 	buildSignCommand,
@@ -451,6 +451,41 @@ describe('helpers', () => {
 
 					expect(results).toHaveLength(2)
 					expect(manifest.assets).toHaveLength(2)
+				},
+			)
+		})
+
+		it('sums the compressible file sizes into the total', async () => {
+			await withTestDir(
+				{
+					'root/a.html': '<p>alpha alpha alpha</p>',
+					'root/nested/b.css': 'body { color: red; color: red; }',
+					'root/c.png': 'not-really-a-png',
+				},
+				(scratch) => {
+					const manifest = compressDirectory(join(scratch.path, 'root'))
+					const original = manifest.assets.reduce((sum, asset) => sum + asset.size.original, 0)
+					const compressed = manifest.assets.reduce((sum, asset) => sum + asset.size.compressed, 0)
+
+					expect(original).toBe(
+						Buffer.byteLength('<p>alpha alpha alpha</p>') +
+							Buffer.byteLength('body { color: red; color: red; }'),
+					)
+					expect(manifest.total).toEqual(computeCompressionSize(original, compressed))
+				},
+			)
+		})
+
+		it('reports a zero total for a directory with no compressible file', async () => {
+			await withTestDir(
+				{
+					'root/c.png': 'not-really-a-png',
+				},
+				(scratch) => {
+					const manifest = compressDirectory(join(scratch.path, 'root'))
+
+					expect(manifest.assets).toEqual([])
+					expect(manifest.total).toEqual({ original: 0, compressed: 0, ratio: 0 })
 				},
 			)
 		})
@@ -930,17 +965,17 @@ describe('helpers', () => {
 		})
 	})
 
-	describe('computeSize', () => {
+	describe('computeCompressionSize', () => {
 		it('returns ratio 0 when original is 0', () => {
-			expect(computeSize(0, 0)).toEqual({ original: 0, compressed: 0, ratio: 0 })
+			expect(computeCompressionSize(0, 0)).toEqual({ original: 0, compressed: 0, ratio: 0 })
 		})
 
 		it('computes the compression ratio', () => {
-			expect(computeSize(100, 50)).toEqual({ original: 100, compressed: 50, ratio: 0.5 })
+			expect(computeCompressionSize(100, 50)).toEqual({ original: 100, compressed: 50, ratio: 0.5 })
 		})
 
 		it('allows a ratio above 1 (compressed larger than original)', () => {
-			const result = computeSize(10, 20)
+			const result = computeCompressionSize(10, 20)
 			expect(result.ratio).toBe(2)
 		})
 	})
@@ -982,8 +1017,12 @@ describe('helpers', () => {
 					expect(scratch.has('input.html.br')).toBe(true)
 					expect(result.input).toBe(input)
 					expect(result.output).toBe(output)
-					expect(result.size.original).toBeGreaterThan(0)
-					expect(result.size.compressed).toBeGreaterThan(0)
+					expect(result.size).toEqual(
+						computeCompressionSize(
+							Buffer.byteLength('<p>hello hello hello</p>'),
+							readFileSync(output).length,
+						),
+					)
 				},
 			)
 		})
